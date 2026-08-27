@@ -31,6 +31,7 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
 )
 SELECT_AI_DEBUG = "--debug" in sys.argv or os.environ.get("A2A_DEMO_DEBUG") == "1"
+MASKED_SECRET = "••••••••"
 
 # Tokens live only for the life of this process. The browser stores an opaque ID,
 # never a token or password.
@@ -82,6 +83,18 @@ def volatile_state() -> dict[str, object]:
         session_id = secrets.token_urlsafe(32)
         session["volatile_session_id"] = session_id
     return volatile_sessions.setdefault(session_id, {})
+
+
+def request_secret(state: dict[str, object], form_name: str, state_name: str, label: str) -> str:
+    """Reuse a masked process-memory secret without writing it to settings or HTML."""
+    submitted = request.form.get(form_name, "")
+    if submitted and submitted != MASKED_SECRET:
+        state[state_name] = submitted
+        return submitted
+    cached = str(state.get(state_name) or "")
+    if cached:
+        return cached
+    raise ValueError(f"Enter {label}.")
 
 
 def set_section_feedback(state: dict[str, object], section: str, message: str, category: str) -> None:
@@ -195,11 +208,12 @@ def render_workspace(template_name: str, section: str):
     wallet_dir = state.get("wallet_dir") or existing_wallet_directory(wallet_database_ocid) or discovered_wallet_directory()
     wallet_dir = str(wallet_dir) if wallet_dir else None
     return render_template(
-        template_name, nav_section=section, settings=settings, profiles=oci_profiles(),
+        template_name, nav_section=section, page_view=request.args.get("view", ""), settings=settings, profiles=oci_profiles(),
         provisioned_database=state.get("provisioned_database"), delete_request=state.get("delete_request"),
         provision_settings=provision_settings, wallet_settings=wallet_settings, wallet_dir=wallet_dir,
         wallet_database_ocid=wallet_database_ocid, wallet_status=state.get("wallet_status"),
         admin_connection_ok=state.get("admin_connection_ok", False), admin_connection_summary=state.get("admin_connection_summary", ""),
+        masked_secret=MASKED_SECRET, admin_password_cached=bool(state.get("admin_password")), wallet_password_cached=bool(state.get("admin_wallet_password")), target_schema_password_cached=any(str(key).startswith("target_schema_password:") for key in state),
         admin_settings=admin_settings, select_ai_settings=select_ai_settings,
         sample_settings=sample_settings, sample_tables=state.get("sample_tables", []), sample_data_ready=state.get("sample_data_ready", False), target_select_ai_ready=state.get("target_select_ai_ready", False), target_select_ai_profiles=state.get("target_select_ai_profiles", []), target_select_ai_credentials=state.get("target_select_ai_credentials", []), target_select_ai_privileges=state.get("target_select_ai_privileges", []),
         select_ai_checklist=state.get("select_ai_checklist", {}), select_ai_profiles=state.get("select_ai_profiles", []),
@@ -1725,7 +1739,7 @@ def setup_infra_page():
 
 @app.get("/setup/infra/provision")
 def infra_operations_page():
-    return render_workspace("infra.html", "setup-infra")
+    return render_workspace("infra.html", f"setup-infra-{request.args.get('view', 'context')}")
 
 
 @app.get("/setup/user")
@@ -1748,6 +1762,11 @@ def test_token_page():
     return render_workspace("oauth_token.html", "test-token")
 
 
+@app.get("/test/listener")
+def test_listener_page():
+    return render_workspace("oauth_listener.html", "test-listener")
+
+
 @app.get("/test/team")
 def test_team_page():
     return render_workspace("test_team.html", "test-team")
@@ -1765,17 +1784,17 @@ def select_ai_page():
 
 @app.get("/connect")
 def connect_page():
-    return render_workspace("connect.html", "setup-infra")
+    return render_workspace("connect.html", f"setup-connect-{request.args.get('view', 'status')}")
 
 
 @app.get("/sample-data")
 def sample_data_page():
-    return render_workspace("sample_data.html", "setup-user")
+    return render_workspace("sample_data.html", f"setup-user-{request.args.get('view', 'schema')}")
 
 
 @app.get("/oauth-clients")
 def oauth_clients_page():
-    return render_workspace("oauth_clients.html", "setup-oauth-register")
+    return render_workspace("oauth_clients.html", f"setup-oauth-{request.args.get('view', 'register')}")
 
 
 @app.get("/oauth-token")
@@ -1793,7 +1812,7 @@ def oauth_client_register_route():
         set_section_feedback(state, "oauth-clients", f"Registered OAuth client {result.get('client_name', '')}. Copy the one-time secret now.", "success")
     except (ValueError, RuntimeError, requests.RequestException) as exc:
         set_section_feedback(state, "oauth-clients", f"OAuth client registration failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("oauth_clients_page"))
+    return redirect(url_for("oauth_clients_page", view="register"))
 
 
 @app.post("/oauth-clients/listener")
@@ -1805,7 +1824,7 @@ def oauth_listener_route():
     state.pop("oauth_callback_received", None)
     if request.form.get("return_workspace") == "oauth-token":
         set_section_feedback(state, "oauth-token", "Local callback listener enabled for 10 minutes. Register the displayed loopback URI, then start authorization.", "success")
-        return redirect(url_for("oauth_token_page", _anchor="listener"))
+        return redirect(url_for("test_listener_page"))
     set_section_feedback(state, "oauth-clients", "Local callback listener enabled for 10 minutes. Register the displayed loopback URI, then start authorization from the external client.", "success")
     return redirect(url_for("oauth_clients_page", _anchor="listener"))
 
@@ -1930,7 +1949,7 @@ def sample_data_select_route():
         set_section_feedback(state, "sample-data", f"Selected {schema}; found {len(tables)} controlled demo table(s).", "success")
     except Exception as exc:
         set_section_feedback(state, "sample-data", f"Schema selection failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("sample_data_page", _anchor="schema"))
+    return redirect(url_for("sample_data_page", view="schema"))
 
 
 @app.post("/sample-data/schema/create")
@@ -1947,7 +1966,7 @@ def sample_schema_create_route():
         set_section_feedback(state, "sample-data", f"Created target schema {schema}. Create the controlled sample data next.", "success")
     except Exception as exc:
         set_section_feedback(state, "sample-data", f"Schema creation failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("sample_data_page", _anchor="schema"))
+    return redirect(url_for("sample_data_page", view="schema"))
 
 
 @app.post("/sample-data/privileges")
@@ -1970,7 +1989,7 @@ def target_select_ai_privileges_route():
         set_section_feedback(state, "sample-data", f"ADMIN verified idempotent EXECUTE grants for {schema}: " + ", ".join(granted) + ".", "success")
     except Exception as exc:
         set_section_feedback(state, "sample-data", f"Target-schema privilege grant failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("sample_data_page", _anchor="privileges"))
+    return redirect(url_for("sample_data_page", view="privileges"))
 
 
 @app.post("/sample-data/create")
@@ -1986,7 +2005,7 @@ def sample_data_create_route():
         set_section_feedback(state, "sample-data", f"Created controlled DEMO_SALES data in {schema}: " + ", ".join(f"{row['name']} ({row['rows']} rows)" for row in tables), "success")
     except Exception as exc:
         set_section_feedback(state, "sample-data", f"Sample-data creation failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("sample_data_page", _anchor="data"))
+    return redirect(url_for("sample_data_page", view="data"))
 
 
 @app.post("/sample-data/select-ai")
@@ -2000,17 +2019,18 @@ def target_select_ai_setup_route():
         form["provider"] = str(form.get("provider") or "oci").lower()
         schema = checked_identifier(form.get("target_schema", ""), "Target schema")
         profile = checked_identifier(form.get("profile_name", ""), "Select AI profile")
+        target_password = request_secret(state, "target_schema_password", f"target_schema_password:{schema}", "target-schema password")
         if form.get("provider") == "oci":
             form["oci_private_key"] = read_oci_private_key()
         checklist: dict[str, str] = {}
         grant_target_select_ai_privileges(state, schema)
         state["target_select_ai_privileges"] = target_select_ai_privilege_status(state, schema)
         checklist["database privileges"] = "ADMIN granted EXECUTE on DBMS_CLOUD, DBMS_CLOUD_AI, and DBMS_CLOUD_AI_AGENT"
-        connection = target_schema_connection(state, schema, request.form.get("target_schema_password", ""))
+        connection = target_schema_connection(state, schema, target_password)
         run_select_ai_setup(state, form, connection=connection, checklist=checklist, resource_principal_username=schema)
         # Use a separately opened session for the stateless call; setup closes
         # its connection after commit and must not be reused for the test.
-        result = test_target_select_ai_profile(state, schema, request.form.get("target_schema_password", ""), profile)
+        result = test_target_select_ai_profile(state, schema, target_password, profile)
         state["target_select_ai_ready"] = True
         state["target_select_ai_checklist"] = checklist
         state["sample_settings"] = {"target_schema": schema}
@@ -2022,7 +2042,7 @@ def target_select_ai_setup_route():
         state["target_select_ai_ready"] = False
         select_ai_debug(state, "Target-schema Select AI setup error", error=str(exc)[:1_500])
         set_section_feedback(state, "sample-data", f"Target-schema Select AI setup failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("sample_data_page", _anchor="target-select-ai"))
+    return redirect(url_for("sample_data_page", view="select-ai"))
 
 
 @app.post("/sample-data/select-ai/test")
@@ -2031,13 +2051,14 @@ def target_select_ai_test_route():
     try:
         schema = checked_identifier(request.form.get("target_schema", ""), "Target schema")
         profile = checked_identifier(request.form.get("profile_name", ""), "Profile name")
-        result = test_target_select_ai_profile(state, schema, request.form.get("target_schema_password", ""), profile)
+        password = request_secret(state, "target_schema_password", f"target_schema_password:{schema}", "target-schema password")
+        result = test_target_select_ai_profile(state, schema, password, profile)
         state["target_select_ai_ready"] = True
         set_section_feedback(state, "sample-data", f"Target-schema Select AI test passed for {schema}.{profile}: {result[:200]}", "success")
     except Exception as exc:
         state["target_select_ai_ready"] = False
         set_section_feedback(state, "sample-data", f"Target-schema Select AI test failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("sample_data_page", _anchor="target-select-ai"))
+    return redirect(url_for("sample_data_page", view="select-ai"))
 
 
 @app.post("/sample-data/select-ai/resources")
@@ -2045,12 +2066,13 @@ def target_select_ai_resources_route():
     state = volatile_state()
     try:
         schema = checked_identifier(request.form.get("target_schema", ""), "Target schema")
-        profiles, credentials = list_target_select_ai_resources(state, schema, request.form.get("target_schema_password", ""))
+        password = request_secret(state, "target_schema_password", f"target_schema_password:{schema}", "target-schema password")
+        profiles, credentials = list_target_select_ai_resources(state, schema, password)
         state["sample_settings"] = {"target_schema": schema}
         set_section_feedback(state, "sample-data", f"Found {len(profiles)} target-schema profile(s) and {len(credentials)} credential(s) in {schema}.", "success")
     except Exception as exc:
         set_section_feedback(state, "sample-data", f"Target-schema resource list failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("sample_data_page", _anchor="target-select-ai"))
+    return redirect(url_for("sample_data_page", view="select-ai"))
 
 
 @app.post("/sample-data/select-ai/profile/delete")
@@ -2061,14 +2083,14 @@ def target_select_ai_profile_delete_route():
             raise ValueError("Type DELETE PROFILE to remove the target-schema Select AI profile.")
         schema = checked_identifier(request.form.get("target_schema", ""), "Target schema")
         profile = checked_identifier(request.form.get("profile_name", ""), "Profile name")
-        password = request.form.get("target_schema_password", "")
+        password = request_secret(state, "target_schema_password", f"target_schema_password:{schema}", "target-schema password")
         drop_target_select_ai_profile(state, schema, password, profile)
         list_target_select_ai_resources(state, schema, password)
         state["target_select_ai_ready"] = False
         set_section_feedback(state, "sample-data", f"Deleted target-schema profile {profile} from {schema}. Its credential was not deleted.", "success")
     except Exception as exc:
         set_section_feedback(state, "sample-data", f"Target-schema profile delete failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("sample_data_page", _anchor="target-select-ai"))
+    return redirect(url_for("sample_data_page", view="cleanup"))
 
 
 @app.post("/sample-data/select-ai/credential/delete")
@@ -2079,14 +2101,14 @@ def target_select_ai_credential_delete_route():
             raise ValueError("Type DELETE CREDENTIAL to remove the target-schema provider credential.")
         schema = checked_identifier(request.form.get("target_schema", ""), "Target schema")
         credential = checked_identifier(request.form.get("credential_name", ""), "Credential name")
-        password = request.form.get("target_schema_password", "")
+        password = request_secret(state, "target_schema_password", f"target_schema_password:{schema}", "target-schema password")
         drop_target_select_ai_credential(state, schema, password, credential)
         list_target_select_ai_resources(state, schema, password)
         state["target_select_ai_ready"] = False
         set_section_feedback(state, "sample-data", f"Deleted target-schema credential {credential} from {schema}.", "success")
     except Exception as exc:
         set_section_feedback(state, "sample-data", f"Target-schema credential delete failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("sample_data_page", _anchor="target-select-ai"))
+    return redirect(url_for("sample_data_page", view="cleanup"))
 
 
 @app.get("/inferencing")
@@ -2112,7 +2134,7 @@ def profile_select_route():
         set_section_feedback(state, "profile", f"Using OCI profile {profile} in {region}.", "success")
     except (ValueError, RuntimeError) as exc:
         set_section_feedback(state, "profile", str(exc), "error")
-    return redirect(url_for("infra_operations_page", _anchor="profile"))
+    return redirect(url_for("infra_operations_page", view="context"))
 
 
 @app.post("/create-database")
@@ -2151,7 +2173,7 @@ def create_database_route():
         set_section_feedback(state, "provision", "Provisioning request accepted. OCI is now creating the database; configure A2A only after it becomes Available.", "success")
     except (ValueError, RuntimeError) as exc:
         set_section_feedback(state, "provision", str(exc), "error")
-    return redirect(url_for("infra_operations_page", _anchor="provision"))
+    return redirect(url_for("infra_operations_page", view="provision"))
 
 
 @app.post("/delete-database")
@@ -2176,7 +2198,7 @@ def delete_database_route():
         set_section_feedback(state, "delete", "OCI accepted the delete request. Check the work request and console until deletion completes.", "success")
     except (ValueError, RuntimeError) as exc:
         set_section_feedback(state, "delete", str(exc), "error")
-    return redirect(url_for("infra_operations_page", _anchor="delete"))
+    return redirect(url_for("infra_operations_page", view="delete"))
 
 
 @app.post("/agent-card")
@@ -2219,9 +2241,10 @@ def wallet_download_route():
         state["wallet_status"] = lifecycle
         if lifecycle != "AVAILABLE":
             raise ValueError(f"Database status is {lifecycle}. Wait until it is AVAILABLE before generating a wallet; no wallet request was started.")
+        wallet_password = request_secret(state, "wallet_password", "admin_wallet_password", "wallet password")
         wallet_dir = download_wallet(
             profile, region, database_ocid,
-            request.form.get("wallet_password", ""),
+            wallet_password,
         )
         state["wallet_dir"] = str(wallet_dir)
         state["wallet_settings"] = {
@@ -2233,7 +2256,7 @@ def wallet_download_route():
         set_section_feedback(state, "wallet", f"Wallet downloaded and extracted locally to {wallet_dir.relative_to(Path.cwd())}.", "success")
     except (ValueError, RuntimeError) as exc:
         set_section_feedback(state, "wallet", str(exc), "error")
-    return redirect(url_for("connect_page", _anchor="wallet"))
+    return redirect(url_for("connect_page", view="wallet"))
 
 
 @app.post("/wallet/status")
@@ -2254,7 +2277,7 @@ def wallet_status_route():
         set_section_feedback(state, "wallet", f"Database lifecycle state: {lifecycle}.", "success" if lifecycle == "AVAILABLE" else "error")
     except (ValueError, RuntimeError) as exc:
         set_section_feedback(state, "wallet", str(exc), "error")
-    return redirect(url_for("connect_page", _anchor="status"))
+    return redirect(url_for("connect_page", view="status"))
 
 
 @app.post("/admin/test")
@@ -2271,10 +2294,10 @@ def admin_test_route():
         if not SQL_IDENTIFIER_PATTERN.fullmatch(service_name):
             raise ValueError("Service name must be a wallet service alias such as MYDB_high.")
         username = request.form.get("admin_username", "ADMIN").strip()
-        password = request.form.get("admin_password", "")
-        wallet_password = request.form.get("admin_wallet_password", "")
-        if not username or not password or not wallet_password:
-            raise ValueError("Enter ADMIN username, password, and the wallet password.")
+        password = request_secret(state, "admin_password", "admin_password", "ADMIN password")
+        wallet_password = request_secret(state, "admin_wallet_password", "admin_wallet_password", "wallet password")
+        if not username:
+            raise ValueError("Enter the ADMIN username.")
         admin_settings = {key: request.form.get(key, "").strip() for key in ADMIN_SETTING_KEYS}
         save_last_settings(admin_settings)
         state["admin_settings"] = admin_settings
@@ -2292,7 +2315,7 @@ def admin_test_route():
     except Exception as exc:  # Driver exceptions vary by installed Oracle client.
         state.pop("admin_connection_ok", None)
         set_section_feedback(state, "wallet", f"ADMIN connection failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("connect_page", _anchor="admin"))
+    return redirect(url_for("connect_page", view="admin"))
 
 
 @app.post("/select-ai/setup")
@@ -2420,7 +2443,7 @@ def select_ai_routing_route():
 
 @app.get("/agents")
 def agents_page():
-    return render_workspace("agents.html", "setup-agents")
+    return render_workspace("agents.html", f"setup-agents-{request.args.get('view', 'readiness')}")
 
 
 @app.post("/agents/refresh")
@@ -2433,7 +2456,7 @@ def agents_refresh():
     except (ValueError, RuntimeError, requests.RequestException) as exc:
         set_section_feedback(state, "agents", str(exc), "error")
         flash(str(exc), "error")
-    return redirect(url_for("agents_page"))
+    return redirect(url_for("agents_page", view="refresh"))
 
 
 @app.post("/agents/team")
@@ -2447,7 +2470,7 @@ def team_action_route():
     except Exception as exc:
         set_section_feedback(state, "agents", f"Team action failed: {str(exc)[:1_500]}", "error")
         flash(f"Team action failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("agents_page"))
+    return redirect(url_for("agents_page", view="delete" if request.form.get("action") == "delete" else "install"))
 
 
 @app.post("/agents/readiness")
@@ -2470,7 +2493,7 @@ def agents_readiness_route():
     except Exception as exc:
         state["agent_readiness_ok"] = False
         set_section_feedback(state, "agents", f"Readiness check failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("agents_page", _anchor="readiness"))
+    return redirect(url_for("agents_page", view="readiness"))
 
 
 @app.post("/agents/install")
@@ -2482,12 +2505,15 @@ def agents_install_route():
         sample_name = request.form.get("sample_name", "")
         schema = checked_identifier(request.form.get("target_schema", ""), "Target schema")
         profile = checked_identifier(request.form.get("profile_name", ""), "Select AI profile")
-        team_name = deploy_sample(state, sample_name, schema, profile, {key: request.form.get(key, "").strip() for key in request.form})
+        form = {key: request.form.get(key, "").strip() for key in request.form}
+        if sample_name == "database-provisioning":
+            form["target_schema_password"] = request_secret(state, "target_schema_password", f"target_schema_password:{schema}", "target-schema password")
+        team_name = deploy_sample(state, sample_name, schema, profile, form)
         state["sample_agent_installed"] = True
         set_section_feedback(state, "agents", f"Installed {sample_name} in {schema}; published team {team_name}. Refresh A2A discovery next.", "success")
     except Exception as exc:
         set_section_feedback(state, "agents", f"Sample agent installation failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("agents_page", _anchor="install"))
+    return redirect(url_for("agents_page", view="install"))
 
 
 @app.post("/inferencing/team")

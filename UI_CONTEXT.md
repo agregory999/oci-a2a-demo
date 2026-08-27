@@ -571,3 +571,25 @@ Add or modify the relevant section above. For a new page, include:
 ## Change requests
 
 <!-- Add your next UI/product changes below this line. -->
+Every workflow page uses the same composition: one vertical center-pane task
+and a right-side help panel. Forms stack fields vertically so a user completes
+one decision at a time. The help panel explains the purpose of each page
+section, its inputs, and the next expected outcome.
+
+Database and target-schema passwords may remain in process memory for the
+current browser session after first use. Their fields render a mask and may be
+left unchanged to reuse the in-memory value; replacing the field updates it.
+They are never written to `last-settings.json`, the browser session cookie, or
+debug output, and disappear when the app process restarts. Vault secret OCIDs
+are identifiers, not secret values, and can be shown and persisted normally.
+The local callback listener is its own **A2A Testing · Local listener** page.
+It is deliberately separate from endpoint preparation, authorization, and code
+exchange so each navigation item has one topic and one action.
+
+The left workflow outline is the primary organizer, rather than an in-page
+tab strip. Each setup sub-item renders one focused operation, or at most two
+inseparable cards such as create-and-list. Destructive cleanup items always
+appear last in their workflow group: target Select AI cleanup, team deletion,
+and database deletion. The active navigation state identifies exactly one
+sub-item, while the right-side help explains that operation's inputs, result,
+and the next step.

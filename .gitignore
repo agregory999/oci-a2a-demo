@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+last-settings.json
+wallet/
+oci_a2a_demo.egg-info/
+sqlcl-latest.zip

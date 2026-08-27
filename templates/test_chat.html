@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="page-layout">
+  <div>
+    <p class="lede">Chat with the selected A2A team. Oracle returns a task; this page polls briefly, then preserves a single conversation context.</p>
+    <nav class="tabs">
+      <a href="{{url_for('test_token_page')}}">1. OAuth token</a>
+      <a href="{{url_for('test_team_page')}}">2. Team selection</a>
+      <a class="active" href="{{url_for('test_chat_page')}}">3. Chat</a>
+    </nav>
+    <section class="panel">
+      <h2>Chat{% if selected_team %} — {{selected_team}}{% endif %}</h2>
+      {% if not selected_card %}
+        <p class="notice">Select a team and load its Agent Card before sending a message.</p>
+        <p><a class="choice-card" href="{{url_for('test_team_page')}}">Choose a team →</a></p>
+      {% endif %}
+      {% if a2a_context_id %}
+        <p class="hint">Conversation context is active.{% if pending_a2a_task_id %} Task <code>{{pending_a2a_task_id}}</code> is <strong>{{last_a2a_task_state or 'pending'}}</strong>.{% endif %}</p>
+      {% endif %}
+      <div class="chat-log" data-chat-log>
+        {% for message in chat_history %}
+          <div class="message {{message.role}}"><small>{{message.role|title}}</small>{{message.text}}</div>
+        {% else %}
+          <p class="hint">No messages in this browser session yet.</p>
+        {% endfor %}
+      </div>
+      {% if pending_a2a_task_id and last_a2a_task_state|lower not in ['input-required', 'auth-required'] %}
+        <p class="notice">Task {{pending_a2a_task_id}} is pending.</p>
+        <form method="post" action="{{url_for('inferencing_task_status_route')}}"><p><button>Check task status</button></p></form>
+      {% endif %}
+      {% if select_ai_debug_enabled and last_a2a_task_diagnostic %}
+        <details><summary>Last task diagnostic{% if last_a2a_task_id %} — {{last_a2a_task_id}}{% endif %}</summary>
+          <p class="hint">Oracle task response retained in this browser session. Do not copy sensitive prompts or results into tickets.</p>
+          <pre>{{last_a2a_task_diagnostic|tojson(indent=2)}}</pre>
+        </details>
+      {% endif %}
+      <form method="post" action="{{url_for('inferencing_chat_route')}}">
+        <label>Message</label>
+        <textarea name="message" rows="4" placeholder="{% if pending_a2a_task_id and last_a2a_task_state|lower == 'input-required' %}Reply YES, NO, or provide corrections to continue the current task.{% else %}Ask the selected A2A team a question.{% endif %}" required></textarea>
+        <p><button {% if not access_token or not selected_team or not selected_card %}disabled title="An external token and loaded Agent Card are required"{% endif %}>Send message and wait</button></p>
+      </form>
+      <form method="post" action="{{url_for('inferencing_chat_reset_route')}}"><p><button class="secondary">Start new conversation</button></p></form>
+    </section>
+  </div>
+  <aside class="sidebar-help panel">
+    <h2>Chat</h2>
+    <p>Approval requests use the same A2A task and conversation context. Reply in this chat; do not start a new conversation until the task completes or is no longer needed.</p>
+    <p>Enable debug mode only when you need raw task diagnostics.</p>
+  </aside>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.querySelectorAll('[data-chat-log]').forEach((log) => {
+    log.scrollTop = log.scrollHeight;
+  });
+</script>
+{% endblock %}

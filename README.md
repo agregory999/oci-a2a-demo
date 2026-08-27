@@ -17,7 +17,9 @@ Open <http://127.0.0.1:5000>.
 1. **Setup → Infra & ADMIN**: select OCI profile/region, select or provision
    the database, download its wallet, and test the ADMIN connection.
 2. **Setup → Target User**: create/select the schema, grant required packages,
-   create its credential and enabled `A2A_PROFILE`.
+   then create its enabled `A2A_PROFILE` using either an OCI API-signing key or
+   Resource Principal. Resource Principal uses the database-managed
+   `OCI$RESOURCE_PRINCIPAL`; configure its OCI policies outside the console.
 3. **Setup → Package Readiness**: deploy a package.
    - **Sales Data Query** requires controlled demo data.
    - **Database Provisioning** requires a dedicated target schema password,

@@ -263,14 +263,25 @@ Sections, in order:
 
 ### Setup · Select AI
 
-Sections, in order.  Should allow full lifecycle of creation, inspection, and deletion of credentials and profiles.  More types of credentials and providers will be supported in the future:
+Sections, in order. Should allow full lifecycle of creation, inspection, and
+deletion of credentials and profiles.
 
 1. **Create credential**
-   - Supported type: OCI API Key (for now)
-   - OCI flow uses a selected local API-signing private-key file; the private
-     key is read for the request only and is not persisted
+   - Supported authentication: OCI API-signing key, OCI Resource Principal,
+     and OpenAI API key.
+   - OCI API-key flow uses a selected local API-signing private-key file; the
+     key is read for the request only and is not persisted.
+   - OCI Resource Principal uses the database-managed
+     `OCI$RESOURCE_PRINCIPAL` credential. The console enables principal
+     authentication for ADMIN or the selected target schema and creates a
+     profile that references that fixed credential. It does not create, store,
+     inspect, or delete a second credential object.
+   - The user configures the Resource Principal dynamic group and OCI IAM
+     policies outside the console. The UI requires only the OCI Generative AI
+     compartment, with optional region and model.
    - Credential names and non-secret OCI settings are persisted locally
-   - Created Credential name is shown in bottom dock
+   - The selected credential name is shown in the bottom dock. For Resource
+     Principal, it is always `OCI$RESOURCE_PRINCIPAL`.
 
 3. **Create Select AI Profile**
    - Supported providers: OCI Generative AI and OpenAI only
@@ -324,17 +335,21 @@ Sections, in order:
 3. **Select AI data access**
    - Create the provider credential and selected Select AI profile in the
      target schema itself. The tested ADMIN connection provides the wallet and
-     service context, but an ADMIN-owned credential/profile cannot be used by
-     agent tools executing as the target schema.
+     service context, but an ADMIN-owned API-key credential/profile cannot be
+     used by agent tools executing as the target schema. Resource Principal is
+     database-managed, but it must be enabled for the target schema and the
+     profile itself is still target-schema owned.
    - Before the target-schema connection, use ADMIN to grant `EXECUTE` on
      `DBMS_CLOUD`, `DBMS_CLOUD_AI`, and `DBMS_CLOUD_AI_AGENT` to that schema.
    - Collect the target-schema password and provider secret/key only for this
-     request; never persist either value.
+     request; never persist either value. Resource Principal needs no provider
+     secret, user OCID, tenancy OCID, fingerprint, or private key.
    - Run a stateless `DBMS_CLOUD_AI.GENERATE` test as the target schema after
      creation. For non-OCI providers, explain that the target schema also
      needs the required network ACL.
-   - List the target schema's profile names/statuses and credential names
-     without exposing secrets. Permit profile deletion only with `DELETE
+   - List the target schema's profile names/statuses and user-owned credential
+     names without exposing secrets. Explain that the system-managed
+     `OCI$RESOURCE_PRINCIPAL` might not appear in that list. Permit profile deletion only with `DELETE
      PROFILE` confirmation and credential deletion only with `DELETE
      CREDENTIAL`; advise deleting the profile first.
    - Present a safe metadata/readiness result in the status dock.

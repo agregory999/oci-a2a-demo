@@ -741,10 +741,25 @@ def run_local_sample(
             connection.commit()
 
 
-def run_select_ai_setup(state: dict[str, object], form: dict[str, str], connection=None, checklist: dict[str, str] | None = None) -> None:
+def enable_oci_resource_principal(state: dict[str, object], username: str = "") -> None:
+    """Enable the database-managed OCI principal for ADMIN or one target schema."""
+    username = checked_identifier(username, "Target schema") if username else "ADMIN"
+    statement = "BEGIN DBMS_CLOUD_ADMIN.ENABLE_PRINCIPAL_AUTH(provider => 'OCI', username => :username); END;"
+    with database_connection(state) as admin_connection:
+        with admin_connection.cursor() as cursor:
+            select_ai_debug(state, "Enable OCI Resource Principal", statement, username=username)
+            cursor.execute(statement, username=username)
+        admin_connection.commit()
+
+
+def run_select_ai_setup(
+    state: dict[str, object], form: dict[str, str], connection=None,
+    checklist: dict[str, str] | None = None, resource_principal_username: str = "",
+) -> None:
     state.pop("select_ai_debug", None)
-    provider = str(form.get("provider") or "oci").lower()
-    credential_name = checked_identifier(form["credential_name"], "Credential name")
+    selected_provider = str(form.get("provider") or "oci").lower()
+    provider = "oci" if selected_provider == "oci_resource_principal" else selected_provider
+    credential_name = "OCI$RESOURCE_PRINCIPAL" if selected_provider == "oci_resource_principal" else checked_identifier(form["credential_name"], "Credential name")
     profile_name = checked_identifier(form["profile_name"], "Profile name")
     checklist = checklist if checklist is not None else state.setdefault("select_ai_checklist", {})
     attributes: dict[str, str] = {"provider": provider, "credential_name": credential_name}
@@ -762,7 +777,7 @@ def run_select_ai_setup(state: dict[str, object], form: dict[str, str], connecti
                     name=credential_name, username="OPENAI", password=api_key,
                 )
                 checklist["provider credential"] = "OpenAI credential created"
-            elif provider == "oci":
+            elif selected_provider == "oci":
                 for key in ("oci_user_ocid", "oci_tenancy_ocid", "oci_private_key", "oci_fingerprint", "oci_compartment_id"):
                     if not form[key]:
                         raise ValueError("Complete all OCI Generative AI credential fields.")
@@ -783,8 +798,18 @@ def run_select_ai_setup(state: dict[str, object], form: dict[str, str], connecti
                 if form.get("oci_model"):
                     attributes["model"] = form["oci_model"]
                 checklist["provider credential"] = "OCI Generative AI signing credential created"
+            elif selected_provider == "oci_resource_principal":
+                if not form.get("oci_compartment_id"):
+                    raise ValueError("Enter the OCI Generative AI compartment OCID.")
+                enable_oci_resource_principal(state, resource_principal_username)
+                attributes["oci_compartment_id"] = form["oci_compartment_id"]
+                if form.get("oci_region"):
+                    attributes["region"] = form["oci_region"]
+                if form.get("oci_model"):
+                    attributes["model"] = form["oci_model"]
+                checklist["provider credential"] = "Database-managed OCI$RESOURCE_PRINCIPAL enabled; no API-key credential was created"
             else:
-                raise ValueError("Choose OCI Generative AI or OpenAI.")
+                raise ValueError("Choose OCI API key, OCI Resource Principal, or OpenAI.")
             statement = "BEGIN DBMS_CLOUD_AI.CREATE_PROFILE(:profile, :attributes, 'enabled'); END;"
             select_ai_debug(state, "Create Select AI profile", statement, profile=profile_name, attributes=json.dumps(attributes))
             cursor.execute(
@@ -934,6 +959,8 @@ def drop_target_select_ai_profile(state: dict[str, object], schema_name: str, pa
 def drop_target_select_ai_credential(state: dict[str, object], schema_name: str, password: str, credential_name: str) -> None:
     schema_name = checked_identifier(schema_name, "Target schema")
     credential_name = checked_identifier(credential_name, "Credential name")
+    if credential_name.upper() == "OCI$RESOURCE_PRINCIPAL":
+        raise ValueError("OCI$RESOURCE_PRINCIPAL is database-managed and cannot be deleted from this console.")
     with target_schema_connection(state, schema_name, password) as connection:
         with connection.cursor() as cursor:
             cursor.execute("BEGIN DBMS_CLOUD.DROP_CREDENTIAL(:credential); END;", credential=credential_name)
@@ -997,6 +1024,8 @@ def inspect_select_ai_credential(state: dict[str, object], credential_name: str)
 
 def delete_select_ai_credential(state: dict[str, object], credential_name: str) -> None:
     credential_name = checked_identifier(credential_name, "Credential name")
+    if credential_name.upper() == "OCI$RESOURCE_PRINCIPAL":
+        raise ValueError("OCI$RESOURCE_PRINCIPAL is database-managed and cannot be deleted from this console.")
     with database_connection(state) as connection:
         with connection.cursor() as cursor:
             cursor.execute("BEGIN DBMS_CLOUD.DROP_CREDENTIAL(:name); END;", name=credential_name)
@@ -1978,14 +2007,15 @@ def target_select_ai_setup_route():
         state["target_select_ai_privileges"] = target_select_ai_privilege_status(state, schema)
         checklist["database privileges"] = "ADMIN granted EXECUTE on DBMS_CLOUD, DBMS_CLOUD_AI, and DBMS_CLOUD_AI_AGENT"
         connection = target_schema_connection(state, schema, request.form.get("target_schema_password", ""))
-        run_select_ai_setup(state, form, connection=connection, checklist=checklist)
+        run_select_ai_setup(state, form, connection=connection, checklist=checklist, resource_principal_username=schema)
         # Use a separately opened session for the stateless call; setup closes
         # its connection after commit and must not be reused for the test.
         result = test_target_select_ai_profile(state, schema, request.form.get("target_schema_password", ""), profile)
         state["target_select_ai_ready"] = True
         state["target_select_ai_checklist"] = checklist
         state["sample_settings"] = {"target_schema": schema}
-        saved = load_last_settings(); saved.update({"target_schema": schema, "profile_name": profile, "credential_name": form.get("credential_name", "")}); save_last_settings(saved)
+        credential_name = "OCI$RESOURCE_PRINCIPAL" if form.get("provider") == "oci_resource_principal" else form.get("credential_name", "")
+        saved = load_last_settings(); saved.update({"target_schema": schema, "profile_name": profile, "credential_name": credential_name}); save_last_settings(saved)
         state["select_ai_settings"] = {**state.get("select_ai_settings", {}), **{key: form[key] for key in SELECT_AI_SETTING_KEYS if key in form}}
         set_section_feedback(state, "sample-data", f"Target-schema Select AI is ready in {schema}: profile {profile}; live test: {result[:200]}", "success")
     except Exception as exc:

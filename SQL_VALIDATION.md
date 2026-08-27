@@ -255,6 +255,18 @@ SELECT DBMS_CLOUD_AI.GENERATE(
 FROM dual;
 ```
 
+For a Resource Principal profile, `OCI$RESOURCE_PRINCIPAL` is database-managed
+and may not appear in `USER_CREDENTIALS`. Run this as ADMIN to confirm that the
+target schema was enabled to use it:
+
+```sql
+SELECT grantee, table_schema, table_name, privilege
+FROM all_tab_privs
+WHERE grantee = 'DEMO_SALES'
+  AND table_schema = 'ADMIN'
+  AND table_name = 'OCI$RESOURCE_PRINCIPAL';
+```
+
 ## Oracle AI Database Agent sample reference
 
 Oracle's sample installer is designed to run as `ADMIN`, targeting a selected

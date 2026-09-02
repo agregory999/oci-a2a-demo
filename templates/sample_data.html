@@ -1,9 +1,79 @@
 {% extends "base.html" %}
-{% block content %}{% set view = page_view or 'schema' %}{% set password_value = masked_secret if target_schema_password_cached else '' %}<div class="page-layout"><div>
-{% if view == 'schema' %}<p class="lede">Select an existing target schema or create a dedicated one for a sample.</p><section class="panel"><h2>Target schema</h2><form method="post" action="{{url_for('sample_data_select_route')}}"><label>Existing target schema</label><input name="target_schema" value="{{sample_settings.get('target_schema','DEMO_SALES')}}" required><p><button {% if not admin_connection_ok %}disabled{% endif %}>Select and check schema</button></p></form><hr><h3>Create a dedicated schema</h3><form method="post" action="{{url_for('sample_schema_create_route')}}"><div class="fields"><div><label>New schema name</label><input name="target_schema" value="{{sample_settings.get('target_schema','DEMO_SALES')}}" required></div><div><label>Schema password</label><input name="schema_password" type="password" autocomplete="new-password" required></div><div><label>Type CREATE SCHEMA</label><input name="confirmation" required></div></div><p><button class="secondary" {% if not admin_connection_ok %}disabled{% endif %}>Create dedicated schema</button></p></form></section>
-{% elif view == 'privileges' %}<p class="lede">Use the tested ADMIN connection to grant the package privileges required by the target schema.</p><section class="panel"><h2>Target privileges</h2><p class="notice">This idempotent action grants <code>EXECUTE</code> on DBMS_CLOUD, DBMS_CLOUD_AI, and DBMS_CLOUD_AI_AGENT.</p><form method="post" action="{{url_for('target_select_ai_privileges_route')}}"><label>Target schema</label><input name="target_schema" value="{{sample_settings.get('target_schema','DEMO_SALES')}}" required><p><button {% if not admin_connection_ok %}disabled{% endif %}>Grant and verify target privileges</button></p></form>{% if target_select_ai_privileges %}<p class="success">Last verified: {{target_select_ai_privileges|join(', ')}}.</p>{% endif %}</section>
-{% elif view == 'data' %}<p class="lede">Load the controlled sample data required by the Sales Data package.</p><section class="panel"><h2>Demo data</h2><form method="post" action="{{url_for('sample_data_create_route')}}"><div class="fields"><div><label>Target schema</label><input name="target_schema" value="{{sample_settings.get('target_schema','DEMO_SALES')}}" required></div><div><label>Type CREATE SAMPLE DATA</label><input name="confirmation" required></div></div><p><button {% if not admin_connection_ok %}disabled{% endif %}>Create controlled data</button></p></form>{% if sample_tables %}<ul>{% for table in sample_tables %}<li><code>{{table.name}}</code> — {{table.rows}} row(s)</li>{% endfor %}</ul>{% endif %}</section>
-{% elif view == 'select-ai' %}<p class="lede">Create and verify the Select AI profile owned by the target schema.</p><section class="panel"><h2>Target Select AI</h2><p class="notice">The agent runs as this schema. Its profile is separate from ADMIN’s connection.</p><form method="post" action="{{url_for('target_select_ai_setup_route')}}" enctype="multipart/form-data"><div class="fields"><div><label>Target schema</label><input name="target_schema" value="{{sample_settings.get('target_schema','DEMO_SALES')}}" required></div><div><label>Target schema password</label><input name="target_schema_password" type="password" value="{{password_value}}" required></div><div><label>Provider credential</label><div class="checks"><label><input type="radio" name="provider" value="oci" {% if select_ai_settings.get('provider','oci') == 'oci' %}checked{% endif %}> OCI API-signing key</label><label><input type="radio" name="provider" value="oci_resource_principal" {% if select_ai_settings.get('provider') == 'oci_resource_principal' %}checked{% endif %}> OCI Resource Principal</label><label><input type="radio" name="provider" value="openai" {% if select_ai_settings.get('provider') == 'openai' %}checked{% endif %}> OpenAI</label></div></div><div><label>AI profile name</label><input name="profile_name" value="{{select_ai_settings.get('profile_name','A2A_PROFILE')}}" required></div><div><label>Credential name</label><input id="credential_name" name="credential_name" value="{{select_ai_settings.get('credential_name','GENAI_CRED')}}" required></div><div class="oci"><label>OCI GenAI region</label><input name="oci_region" value="{{select_ai_settings.get('oci_region','')}}"></div><div class="oci"><label>Compartment OCID</label><input name="oci_compartment_id" value="{{select_ai_settings.get('oci_compartment_id','')}}"></div><div class="oci-api-key"><label>User OCID</label><input name="oci_user_ocid" value="{{select_ai_settings.get('oci_user_ocid','')}}"></div><div class="oci-api-key"><label>Tenancy OCID</label><input name="oci_tenancy_ocid" value="{{select_ai_settings.get('oci_tenancy_ocid','')}}"></div><div class="oci-api-key"><label>API-key fingerprint</label><input name="oci_fingerprint" value="{{select_ai_settings.get('oci_fingerprint','')}}"></div><div class="oci"><label>Model</label><input name="oci_model" value="{{select_ai_settings.get('oci_model','')}}"></div><div class="oci-api-key"><label>Private key PEM</label><input name="oci_private_key_file" type="file" accept=".pem,.key,text/plain"></div><p class="resource-principal hint" hidden><code>OCI$RESOURCE_PRINCIPAL</code> is database-managed; configure OCI dynamic-group/IAM policies outside the console.</p><div class="openai" hidden><label>OpenAI API key</label><input name="openai_api_key" type="password"></div></div><p><button {% if not admin_connection_ok %}disabled{% endif %}>Create and test target profile</button></p></form>{% if target_select_ai_ready %}<p class="success">Target Select AI passed. Continue to Package readiness.</p>{% endif %}<hr><h3>Inspect target resources</h3><form method="post" action="{{url_for('target_select_ai_resources_route')}}"><label>Target schema</label><input name="target_schema" value="{{sample_settings.get('target_schema','DEMO_SALES')}}" required><label>Target schema password</label><input name="target_schema_password" type="password" value="{{password_value}}" required><p><button class="secondary" {% if not admin_connection_ok %}disabled{% endif %}>List target resources</button></p></form></section>
-{% else %}<p class="lede">Remove target-schema Select AI resources only after testing is complete.</p><section class="panel"><h2>Target cleanup</h2>{% if target_select_ai_profiles %}<form method="post" action="{{url_for('target_select_ai_profile_delete_route')}}"><label>Profile to delete</label><select name="profile_name">{% for profile in target_select_ai_profiles %}<option value="{{profile.name}}">{{profile.name}} — {{profile.status}}</option>{% endfor %}</select><label>Target schema</label><input name="target_schema" value="{{sample_settings.get('target_schema','DEMO_SALES')}}" required><label>Target schema password</label><input name="target_schema_password" type="password" value="{{password_value}}" required><label>Type DELETE PROFILE</label><input name="confirmation" required><p><button class="danger">Delete target profile</button></p></form>{% endif %}{% if target_select_ai_credentials %}<hr><form method="post" action="{{url_for('target_select_ai_credential_delete_route')}}"><label>Credential to delete</label><select name="credential_name">{% for credential in target_select_ai_credentials %}<option value="{{credential}}">{{credential}}</option>{% endfor %}</select><label>Target schema</label><input name="target_schema" value="{{sample_settings.get('target_schema','DEMO_SALES')}}" required><label>Target schema password</label><input name="target_schema_password" type="password" value="{{password_value}}" required><label>Type DELETE CREDENTIAL</label><input name="confirmation" required><p><button class="danger">Delete target credential</button></p></form>{% endif %}{% if not target_select_ai_profiles and not target_select_ai_credentials %}<p class="hint">Use Target Select AI → List target resources before deleting a profile or credential.</p>{% endif %}</section>{% endif %}
-</div><aside class="sidebar-help panel"><h2>Target user · {{view|replace('-', ' ')|title}}</h2>{% if view == 'schema' %}<p>Choose a distinct schema per sample when you want isolation. Schema creation does not create a Select AI profile.</p>{% elif view == 'privileges' %}<p>These grants allow the target user to call the database-managed cloud and agent packages.</p>{% elif view == 'data' %}<p>Controlled data is intentionally separate from agent deployment, so packages remain reusable.</p>{% elif view == 'select-ai' %}<p>Resource Principal uses the database-managed credential and needs no API signing key. API-key and OpenAI options require their corresponding inputs.</p>{% else %}<p>Cleanup is last and does not drop the target schema or its demo tables.</p>{% endif %}</aside></div>{% endblock %}
-{% block scripts %}<script>const radios=document.querySelectorAll('input[name=provider]'),credential=document.getElementById('credential_name');function toggle(){const current=document.querySelector('input[name=provider]:checked');if(!current||!credential)return;const selected=current.value,api=selected==='oci',rp=selected==='oci_resource_principal',oci=api||rp;document.querySelectorAll('.oci').forEach(x=>x.hidden=!oci);document.querySelectorAll('.oci-api-key').forEach(x=>x.hidden=!api);document.querySelectorAll('.resource-principal').forEach(x=>x.hidden=!rp);document.querySelectorAll('.openai').forEach(x=>x.hidden=selected!=='openai');credential.readOnly=rp;if(rp)credential.value='OCI$RESOURCE_PRINCIPAL';}radios.forEach(x=>x.addEventListener('change',toggle));toggle();</script>{% endblock %}
+{% block content %}
+{% set view = page_view or 'schema' %}
+{% set password_value = masked_secret if target_schema_password_cached else '' %}
+<div class="page-layout">
+  <div>
+    {% if view == 'schema' %}
+      <p class="lede">Create a database user that can own a Select AI profile and manually installed agent teams.</p>
+      <section class="panel">
+        <h2>Create target schema</h2>
+        <p class="notice">Requires a tested ADMIN connection. Creation idempotently grants <code>EXECUTE</code> on <code>DBMS_CLOUD</code>, <code>DBMS_CLOUD_AI</code>, and <code>DBMS_CLOUD_AI_AGENT</code>.</p>
+        <p class="hint">Creating a schema does not select it. After it is created, go to <a href="{{ url_for('connect_page', view='admin') }}">Database Connections</a> and test the target-schema connection. That connection selects the target user for the rest of setup.</p>
+        <form method="post" action="{{ url_for('sample_schema_create_route') }}">
+          <label>New schema name</label>
+          <input name="target_schema" required>
+          <label>Schema password</label>
+          <input name="schema_password" type="password" autocomplete="new-password" required>
+          <label>Type CREATE SCHEMA</label>
+          <input name="confirmation" required>
+          <p><button class="secondary" {% if not admin_connection_ok %}disabled{% endif %}>Create schema and grant privileges</button></p>
+        </form>
+        {% if target_select_ai_privileges %}<p class="success">Last verified package grants: {{ target_select_ai_privileges|join(', ') }}.</p>{% endif %}
+      </section>
+    {% else %}
+      <p class="lede">Create and verify the Select AI profile owned by the connected target schema.</p>
+      <section class="panel">
+        <h2>Target Select AI</h2>
+        <p class="notice">The connected target schema—not ADMIN—owns and uses this profile. Use <a href="{{ url_for('agent_config_page') }}">Select AI Agent Configs</a> to view or change a manually installed sample's configuration keys.</p>
+        <form method="post" action="{{ url_for('target_select_ai_setup_route') }}" enctype="multipart/form-data">
+          <label>Target schema</label><input name="target_schema" value="{{ sample_settings.get('target_schema','') }}" required>
+          <label>Target schema password</label><input name="target_schema_password" type="password" value="{{ password_value }}" required>
+          <label>Provider credential</label>
+          <div class="checks">
+            <label><input type="radio" name="provider" value="oci" {% if select_ai_settings.get('provider','oci') == 'oci' %}checked{% endif %}> OCI API-signing key</label>
+            <label><input type="radio" name="provider" value="oci_resource_principal" {% if select_ai_settings.get('provider') == 'oci_resource_principal' %}checked{% endif %}> OCI Resource Principal</label>
+            <label><input type="radio" name="provider" value="openai" {% if select_ai_settings.get('provider') == 'openai' %}checked{% endif %}> OpenAI</label>
+          </div>
+          <label>AI profile name</label><input name="profile_name" value="{{ select_ai_settings.get('profile_name','') }}" required>
+          <label>Credential name</label><input id="credential_name" name="credential_name" value="{{ select_ai_settings.get('credential_name','') }}" required>
+          <div class="oci"><label>OCI GenAI region</label><input name="oci_region" value="{{ select_ai_settings.get('oci_region','') }}"></div>
+          <div class="oci"><label>Compartment OCID</label><input name="oci_compartment_id" value="{{ select_ai_settings.get('oci_compartment_id','') }}"></div>
+          <div class="oci-api-key"><label>User OCID</label><input name="oci_user_ocid" value="{{ select_ai_settings.get('oci_user_ocid','') }}"></div>
+          <div class="oci-api-key"><label>Tenancy OCID</label><input name="oci_tenancy_ocid" value="{{ select_ai_settings.get('oci_tenancy_ocid','') }}"></div>
+          <div class="oci-api-key"><label>API-key fingerprint</label><input name="oci_fingerprint" value="{{ select_ai_settings.get('oci_fingerprint','') }}"></div>
+          <div class="oci"><label>Model</label><input name="oci_model" value="{{ select_ai_settings.get('oci_model','') }}"></div>
+          <div class="oci-api-key"><label>Private key PEM</label><input name="oci_private_key_file" type="file" accept=".pem,.key,text/plain"></div>
+          <p class="resource-principal hint" hidden><code>OCI$RESOURCE_PRINCIPAL</code> is database-managed; configure OCI dynamic-group/IAM policies outside the console.</p>
+          <div class="openai" hidden><label>OpenAI API key</label><input name="openai_api_key" type="password"></div>
+          <p><button {% if not target_connection_ok %}disabled{% endif %}>Create and test target profile</button></p>
+        </form>
+        <hr>
+        <h3>Inspect target resources</h3>
+        <form method="post" action="{{ url_for('target_select_ai_resources_route') }}">
+          <label>Target schema</label><input name="target_schema" value="{{ sample_settings.get('target_schema','') }}" required>
+          <label>Target schema password</label><input name="target_schema_password" type="password" value="{{ password_value }}" required>
+          <p><button class="secondary" {% if not target_connection_ok %}disabled{% endif %}>List target resources</button></p>
+        </form>
+      </section>
+    {% endif %}
+  </div>
+  <aside class="sidebar-help panel">
+    <h2>Target user · {{ view|replace('-', ' ')|title }}</h2>
+    {% if view == 'schema' %}
+      <p>This page requires a tested ADMIN connection. It creates a schema and its necessary DBMS Cloud package grants; it does not choose the active target user.</p>
+    {% else %}
+      <p>Resource Principal uses the database-managed credential and needs no API signing key. API-key and OpenAI options require their corresponding inputs.</p>
+      <p>Manual Select AI profile updates and inspection SQL are available in <code>SQL_VALIDATION.md</code>.</p>
+    {% endif %}
+    {% include "includes/sidebar_status.html" %}
+  </aside>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const radios=document.querySelectorAll('input[name=provider]'),credential=document.getElementById('credential_name');
+function toggle(){const current=document.querySelector('input[name=provider]:checked');if(!current||!credential)return;const selected=current.value,api=selected==='oci',rp=selected==='oci_resource_principal',oci=api||rp;document.querySelectorAll('.oci').forEach(x=>x.hidden=!oci);document.querySelectorAll('.oci-api-key').forEach(x=>x.hidden=!api);document.querySelectorAll('.resource-principal').forEach(x=>x.hidden=!rp);document.querySelectorAll('.openai').forEach(x=>x.hidden=selected!=='openai');credential.readOnly=rp;if(rp)credential.value='OCI$RESOURCE_PRINCIPAL';}
+radios.forEach(x=>x.addEventListener('change',toggle));toggle();
+</script>
+{% endblock %}

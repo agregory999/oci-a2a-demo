@@ -6,3 +6,5 @@ last-settings.json
 wallet/
 oci_a2a_demo.egg-info/
 sqlcl-latest.zip
+.gstack/
+dbnotes.txt

@@ -1,443 +1,158 @@
 # SQL Validation Companion
 
-This file is the companion for SQL shown, tested, or validated by the Oracle
-A2A demo console. Run queries from a SQL worksheet connected as the indicated
-database user. Never place passwords, OAuth tokens, private keys, or API keys
-in this file.
+Use this guide alongside the application to inspect each step from SQLcl. It
+follows the left navigation: **Setup** first, then **A2A testing**, then
+cleanup. Each section names the UI page, database user, and whether the SQL is
+read-only **VERIFY** or an optional change-making **ACTION**.
 
-## Package ownership and published-team check
+Replace `DEMO_SALES`, `PROV2`, `A2A_PROFILE`, and `A2ADEMO_LOW` with your own
+values. Do not put passwords, private keys, OAuth codes/tokens, or provider
+keys in a checked-in script.
 
-Use the package that was deployed. The Sales Data Query package is documented
-throughout this file. The local Database Provisioning package is different: its
-agent objects are created as the provisioning schema (for example `ADBPROV`),
-not as ADMIN.
+## Setup → Infra: Wallet and ADMIN connection
 
-Run this as the provisioning schema. `LIST_TEAMS()` is the authoritative
-owner-side check and avoids release-specific dictionary column names.
+Install SQLcl from Oracle's [SQLcl download and installation
+page](https://www.oracle.com/database/sqldeveloper/technologies/sqlcl/). The
+app stores wallets under the ignored `wallet/` directory. Use the wallet's
+service alias, such as `A2ADEMO_LOW`.
+
+
+### Setup → Wallet / ADMIN / Target connection
+
+Once the wallet has been downloaded within the project, you will see it in the filesystem as `<project>/wallet/ocid/wallet.zip`.  SQLcL requires this path as a cloudconfig, and then connections as any user are allowed.
+
+Once the database is running, the wallet is downloaded, and a target schema has been created in the app, the following should work from SQLcL command line:
 
 ```sql
-SET LONG 100000
-SET LONGCHUNKSIZE 100000
+prompt> sql /nolog
+set cloudconfig /absolute/path/to/wallet.zip
+CONNECT ADMIN@A2ADEMO_LOW
 
-SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') AS session_user
+SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') AS session_user,
+       SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AS current_schema
 FROM dual;
 
-SELECT DBMS_CLOUD_AI_AGENT.LIST_TEAMS() AS available_teams
-FROM dual;
+CONNECT S1@A2ADEMO_LOW
 
-SELECT DBMS_CLOUD_AI_AGENT.DESCRIBE_TEAM(
-  team_name => 'DATABASE_PROVISIONING_TEAM'
-) AS team_card
-FROM dual;
-```
-
-Expected: `DATABASE_PROVISIONING_TEAM` appears in `available_teams`, and the
-team card describes `DATABASE_ADVISOR`, `PROVISION_DATABASE_TASK`, and the two
-provisioning tools. If it does not, redeploy the package using the target
-schema password. Do not rely on `ALTER SESSION SET CURRENT_SCHEMA`; it does
-not change `SESSION_USER`.
-
-To inspect dictionary columns before using named queries on a particular
-database release:
-
-```sql
-SELECT column_name, column_id, data_type
-FROM user_tab_columns
-WHERE table_name = 'USER_AI_AGENT_TEAMS'
-ORDER BY column_id;
-
-SELECT * FROM user_ai_agent_teams;
-```
-
-## ADMIN - Select AI Creds
-
-Queries for the Credentials that Select AI Uses
-
-```sql
-SELECT *
-FROM user_credentials
-WHERE credential_name = 'GENAI_CRED';
-```
-
-```sql
-BEGIN
-  DBMS_CLOUD.DROP_CREDENTIAL('GENAI_CRED');
-END;
-/
-```
-
-## ADMIN - Select AI Profile
-
-Show the Select AI Profile is working
-
-```sql
-DECLARE
-  l_profile VARCHAR2(128);
-BEGIN
-  DBMS_CLOUD_AI.SET_PROFILE('PROF2');
-  l_profile := DBMS_CLOUD_AI.GET_PROFILE;
-  DBMS_OUTPUT.PUT_LINE('Active profile: ' || NVL(l_profile, '<NULL>'));
-END;
-/
-```
-
-## ADMIN - Test Select AI
-
-Queries to test Select AI
-
-```sql
-SELECT DBMS_CLOUD_AI.GENERATE(
-  prompt       => 'Reply exactly: Select AI is ready.',
-  profile_name => 'A2A_PROFILE',
-  action       => 'chat'
-)
+SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') AS session_user,
+       SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AS current_schema
 FROM dual;
 ```
 
-## ADMIN - Verify Agent and Team
+This verifies that both ADMIN and target user exist with the correct password.
 
-Queries to validate that the agent and agent team are created in the correct schema
+You can and should maintain 2 windows or tabs for SQLcL, as the rest of this guide refers to queries by 
+which user should run them.  Pay close attention to the correct user to run as.
 
-```sql
--- Run as ADMIN. Replace DEMO_SALES if a different target schema was used.
--- The current Oracle sample creates these four Select AI Agent objects.
--- Dictionary-view columns differ across Autonomous Database releases.
--- Start with SELECT * to verify the team row and learn this database's column names.
-SELECT *
-FROM dba_ai_agent_teams
-WHERE owner IN (UPPER('DEMO_SALES'), 'ADMIN');
+## Setup → Target schema and Target privileges
 
-SELECT owner, agent_name, status, description
-FROM dba_ai_agents
-WHERE agent_name = 'ORACLE_AI_DATABASE_AGENT_ROLE';
+### UI: Target schema
 
-SELECT *
-FROM dba_ai_agent_tasks
-WHERE owner IN (UPPER('DEMO_SALES'), 'ADMIN');
-
-SELECT *
-FROM dba_ai_agent_tools
-WHERE owner IN (UPPER('DEMO_SALES'), 'ADMIN');
-```
-
-The team row should identify `ORACLE_AI_DATABASE_AGENT` and be `ENABLED`; the
-tool query should return four rows. For the **Sales Data Query** package, the
-upstream Oracle sample is launched as ADMIN and uses `CURRENT_SCHEMA` plus a
-target-schema definer-rights procedure,
-so first establish the actual catalog owner rather than assuming it is the
-target user. The following release-discovery query is useful before running
-more specific checks. The database used by this console exposes the plural task
-view (`DBA_AI_AGENT_TASKS`), while some Oracle documentation releases show the
-singular spelling.
+As `ADMIN`, this will verify the existence of the target schema
 
 ```sql
-SELECT table_name, column_name, column_id, data_type
-FROM all_tab_columns
-WHERE table_name IN (
-  'DBA_AI_AGENT_TEAMS',
-  'DBA_AI_AGENT_TASKS',
-  'DBA_AI_AGENT_TASK',
-  'DBA_AI_AGENTS',
-  'DBA_AI_AGENT_TOOLS'
-)
-ORDER BY table_name, column_id;
-```
-
-The following queries inspect the stored attributes and supporting schema
-objects. Use `SELECT *` intentionally: Oracle’s attribute-view columns can
-vary between database releases.
-
-```sql
-SELECT *
-FROM dba_ai_agent_team_attributes
-WHERE owner = UPPER('DEMO_SALES');
-
-SELECT *
-FROM dba_ai_agents_attributes
-WHERE owner = UPPER('DEMO_SALES')
-  AND agent_name = 'ORACLE_AI_DATABASE_AGENT_ROLE';
-
-SELECT *
-FROM dba_ai_agent_task_attributes
-WHERE owner = UPPER('DEMO_SALES');
-
-SELECT *
-FROM dba_ai_agent_tool_attributes
-WHERE owner = UPPER('DEMO_SALES');
-
-SELECT "KEY", "VALUE", "AGENT"
-FROM demo_sales.selectai_agent_config
-WHERE "AGENT" = 'ORACLE_AI_DATABASE_AGENT'
-ORDER BY "KEY";
-
-SELECT owner, object_name, object_type, status
-FROM all_objects
-WHERE owner = UPPER('DEMO_SALES')
-  AND object_name IN (
-    'SELECTAI_AGENT_CONFIG',
-    'ORACLE_AI_DATA_RETRIEVAL_FUNCTIONS',
-    'INITIALIZE_ORACLE_AI_DATA_RETRIEVAL_AGENT',
-    'INITIALIZE_ORACLE_AI_DATA_RETRIEVAL_TOOLS',
-    'DATA_RETRIEVAL_AGENT'
-  )
-ORDER BY object_type, object_name;
-
-SELECT owner, name, type, line, position, text
-FROM all_errors
-WHERE owner = UPPER('DEMO_SALES')
-  AND name IN (
-    'ORACLE_AI_DATA_RETRIEVAL_FUNCTIONS',
-    'INITIALIZE_ORACLE_AI_DATA_RETRIEVAL_AGENT',
-    'INITIALIZE_ORACLE_AI_DATA_RETRIEVAL_TOOLS',
-    'DATA_RETRIEVAL_AGENT'
-  )
-ORDER BY name, sequence;
-```
-
-## DEMO_SALES - Demo Data
-
-The controlled `DEMO_SALES` schema/data page and the Oracle AI Database Agent
-installer UI are available in the console. The sections below provide safe
-preflight, inspection, and validation queries. Add environment-specific
-installation and chat-validation observations to the test log.
-
-## Target-schema preflight (ADMIN)
-
-Replace `DEMO_SALES` with the selected target schema.
-
-```sql
-SELECT username, account_status
+SELECT username, account_status, created
 FROM dba_users
-WHERE username = UPPER('DEMO_SALES');
-
-SELECT owner, table_name, num_rows
-FROM all_tables
-WHERE owner = UPPER('DEMO_SALES')
-ORDER BY table_name;
-
-SELECT owner, table_name, column_name, data_type, nullable
-FROM all_tab_columns
-WHERE owner = UPPER('DEMO_SALES')
-ORDER BY table_name, column_id;
-
--- The sample agent executes as DEMO_SALES, so its profile must be owned by
--- DEMO_SALES rather than only by ADMIN.
-SELECT owner, profile_name, status, created, last_modified
-FROM dba_cloud_ai_profiles
-WHERE owner = UPPER('DEMO_SALES')
-  AND profile_name = 'A2A_PROFILE';
-
-SELECT table_name, privilege
-FROM dba_tab_privs
-WHERE grantee = UPPER('DEMO_SALES')
-  AND (table_name IN ('DBMS_CLOUD', 'DBMS_CLOUD_AI', 'DBMS_CLOUD_AI_AGENT')
-       OR table_name LIKE 'DBMS_CLOUD$PDBCS%')
-ORDER BY table_name;
+WHERE username = 'S1';
 ```
 
-Connect as the target schema to verify the credential/profile where the agent
-tools run. Do not run this as `ADMIN`.
+### UI: Target privileges
 
+As `ADMIN`, this will verify the grants for the target schema
+
+```sql
+SELECT table_name AS object_name, privilege
+FROM dba_tab_privs
+WHERE grantee = 'S1'
+  AND privilege = 'EXECUTE'
+  AND table_name IN (
+    'DBMS_CLOUD', 'DBMS_CLOUD_AI',
+    'DBMS_CLOUD_AI_AGENT', 'DBMS_CLOUD_PIPELINE'
+  )
+ORDER BY object_name;
+```
+
+If you need to apply a grant, the following will work:
+
+```sql
+GRANT EXECUTE ON DBMS_CLOUD_AI TO S1;
+GRANT EXECUTE ON DBMS_CLOUD_AI_AGENT TO S1;
+GRANT EXECUTE ON DBMS_CLOUD_PIPELINE TO S1;
+```
+
+## Setup → Resource Principal
+
+Resource Principal is optional for API-key Select AI profiles but required for
+the Resource Principal profile option and Database Provisioning package.
+Complete OCI IAM/dynamic-group preparation first; see
+[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md).
+
+Once the Resource Principal page in the UI has been completed, verify in SQL as follows.
+
+### UI: Resource Principal — ADMIN
+
+As `ADMIN`, this will verify whether Resource Principal is enabled
+
+```sql
+SELECT owner, credential_name
+FROM dba_credentials
+WHERE owner = 'ADMIN'
+  AND credential_name = 'OCI$RESOURCE_PRINCIPAL';
+```
+
+If Resource Principal is enabled, you will see:
+
+```OWNER    CREDENTIAL_NAME           
+________ _________________________ 
+ADMIN    OCI$RESOURCE_PRINCIPAL   
+```
+
+### UI: Resource Principal — Target
+
+As `ADMIN`, this will verify whether Resource Principal is enabled for the target schema
+
+```sql
+SELECT grantee, owner, table_name, privilege, grantor
+FROM dba_tab_privs
+WHERE owner = 'ADMIN'
+  AND table_name = 'OCI$RESOURCE_PRINCIPAL'
+  AND grantee = 'S1';
+```
+
+Correct a missing Resource Principal:
+
+```sql
+EXEC DBMS_CLOUD_ADMIN.ENABLE_RESOURCE_PRINCIPAL();
+EXEC DBMS_CLOUD_ADMIN.ENABLE_RESOURCE_PRINCIPAL(username => 'S1');
+```
+
+## Setup → Target Select AI
+
+As the target schema owner, this verifies the Select AI Profile and Credential after creation on the "Target Select AI" page in the UI.
+
+### UI: Target Select AI — credential and profile
+
+Run these as the target schema user.
+
+Credentials (May not exist if you use Resource Principal):
+```sql
+SELECT credential_name FROM user_credentials ORDER BY credential_name;
+```
+
+Select AI Profile:
 ```sql
 SELECT profile_name, status
 FROM user_cloud_ai_profiles
 WHERE profile_name = 'A2A_PROFILE';
-
-SELECT credential_name
-FROM user_credentials
-WHERE credential_name = 'GENAI_CRED';
-
-SELECT DBMS_CLOUD_AI.GENERATE(
-  prompt       => 'Reply exactly: Target schema Select AI is ready.',
-  profile_name => 'A2A_PROFILE',
-  action       => 'chat'
-)
-FROM dual;
+```
+Example output:
+```
+PROFILE_NAME    STATUS     
+_______________ __________ 
+A2A_PROFILE     ENABLED   
 ```
 
-For a Resource Principal profile, `OCI$RESOURCE_PRINCIPAL` is database-managed
-and may not appear in `USER_CREDENTIALS`. Run this as ADMIN to confirm that the
-target schema was enabled to use it:
-
-```sql
-SELECT grantee, table_schema, table_name, privilege
-FROM all_tab_privs
-WHERE grantee = 'DEMO_SALES'
-  AND table_schema = 'ADMIN'
-  AND table_name = 'OCI$RESOURCE_PRINCIPAL';
-```
-
-## Oracle AI Database Agent sample reference
-
-Oracle's sample installer is designed to run as `ADMIN`, targeting a selected
-schema and Select AI profile. It installs configuration, package, and tools
-before it creates the task, agent, and team. The planned console will use the
-same ordered flow and will add its exact, reviewable SQL here before execution.
-
-Expected sample objects:
-
-- `SELECTAI_AGENT_CONFIG`
-- `ORACLE_AI_DATA_RETRIEVAL_FUNCTIONS`
-- `ORACLE_AI_DATABASE_TASK`
-- `ORACLE_AI_DATABASE_AGENT_ROLE`
-- `ORACLE_AI_DATABASE_AGENT`
-
-## Agent and team validation
-
-Run the following as `ADMIN` after the console reports a successful sample
-installation. Replace `DEMO_SALES` when you chose a different target schema.
-
-```sql
--- The sample's configuration binds the agent to the requested Select AI profile.
-SELECT "KEY", "VALUE", "AGENT"
-FROM demo_sales.selectai_agent_config
-WHERE agent = 'ORACLE_AI_DATABASE_AGENT'
-ORDER BY "KEY";
-
--- The package, configuration table, and controlled data tables must be valid.
-SELECT owner, object_name, object_type, status
-FROM all_objects
-WHERE owner = UPPER('DEMO_SALES')
-  AND object_name IN (
-    'SELECTAI_AGENT_CONFIG',
-    'ORACLE_AI_DATA_RETRIEVAL_FUNCTIONS',
-    'DEMO_CUSTOMERS',
-    'DEMO_PRODUCTS',
-    'DEMO_ORDERS'
-  )
-ORDER BY object_type, object_name;
-
--- Confirm the expected demo-data row counts.
-SELECT 'DEMO_CUSTOMERS' AS table_name, COUNT(*) AS row_count
-FROM demo_sales.demo_customers
-UNION ALL
-SELECT 'DEMO_PRODUCTS', COUNT(*) FROM demo_sales.demo_products
-UNION ALL
-SELECT 'DEMO_ORDERS', COUNT(*) FROM demo_sales.demo_orders;
-```
-
-Connect as the target schema to validate tool registration. The Oracle sample
-itself uses `USER_AI_AGENT_TOOLS` for this check.
-
-```sql
-SELECT tool_name, description
-FROM user_ai_agent_tools
-WHERE tool_name IN (
-  'SQL_TOOL',
-  'DISTINCT_VALUES_CHECK',
-  'RANGE_VALUES_CHECK',
-  'GENERATE_CHART'
-)
-ORDER BY tool_name;
-```
-
-The authoritative end-to-end team check is A2A discovery: obtain a token in
-the console, refresh teams, and confirm `ORACLE_AI_DATABASE_AGENT` is listed.
-Then load its Agent Card and send a chat test in **A2A Testing → Team Selection
-and Chat**. Add the resulting
-test prompts and expected answers below after your first successful run.
-
-## ADMIN - Chat activity and task history
-
-The A2A chat request runs under the database user represented by the external
-OAuth token. For this demo that is commonly `DEMO_SALES`. History can contain
-user prompts and generated results, so treat its output as sensitive test data.
-
-First discover the history views and their release-specific columns:
-
-```sql
-SELECT table_name, column_name, column_id, data_type
-FROM all_tab_columns
-WHERE table_name IN (
-  'DBA_AI_AGENT_TEAM_HISTORY',
-  'DBA_AI_AGENT_TASK_HISTORY',
-  'DBA_AI_AGENT_TOOL_HISTORY'
-)
-ORDER BY table_name, column_id;
-```
-
-Then inspect activity for the target schema. Each history view has its own
-owner column: `TEAM_OWNER`, `TASK_OWNER`, or `TOOL_OWNER`. `SELECT *` is
-otherwise deliberate because columns vary by Autonomous Database release.
-
-```sql
-SELECT *
-FROM dba_ai_agent_team_history
-WHERE team_owner = UPPER('DEMO_SALES');
-
-SELECT *
-FROM dba_ai_agent_task_history
-WHERE task_owner = UPPER('DEMO_SALES');
-
-SELECT *
-FROM dba_ai_agent_tool_history
-WHERE tool_owner = UPPER('DEMO_SALES');
-```
-
-For a failed console task, begin with the most recent runs for the published
-sample team. Copy its `TEAM_EXEC_ID`, then use that identifier to inspect the
-task and tool records belonging to the same execution. This avoids assuming an
-undocumented error-message column while still exposing all release-specific
-failure detail.
-
-```sql
-SELECT *
-FROM dba_ai_agent_team_history
-WHERE team_owner = UPPER('DEMO_SALES')
-  AND team_name = 'ORACLE_AI_DATABASE_AGENT'
-ORDER BY start_date DESC
-FETCH FIRST 20 ROWS ONLY;
-
--- Replace the value with TEAM_EXEC_ID from the failed team-history row.
-SELECT *
-FROM dba_ai_agent_task_history
-WHERE task_owner = UPPER('DEMO_SALES')
-  AND team_exec_id = 'paste-team-exec-id-here';
-
-SELECT *
-FROM dba_ai_agent_tool_history
-WHERE tool_owner = UPPER('DEMO_SALES')
-  AND team_exec_id = 'paste-team-exec-id-here';
-```
-
-If a history view is absent on the current database release, use the
-column-discovery query above as the authoritative result; do not substitute an
-ORDS or OAuth audit view for A2A chat activity.
-
-### Scheduler correlation for a task that remains RUNNING
-
-Agent task history connects the database scheduler to the agent framework. A
-`RUNNING` task may therefore have no active foreground `DEMO_SALES` session in
-`V$SESSION`. Inspect the matching team-history row first because it records
-the release-specific job information, then inspect scheduler activity as
-ADMIN.
-
-```sql
-SELECT *
-FROM dba_ai_agent_team_history
-WHERE team_owner = UPPER('DEMO_SALES')
-  AND team_exec_id = 'paste-team-exec-id-here';
-
-SELECT owner, job_name, session_id, running_instance, elapsed_time
-FROM dba_scheduler_running_jobs
-ORDER BY elapsed_time DESC;
-
-SELECT owner, job_name, status, error#, actual_start_date, run_duration,
-       additional_info
-FROM dba_scheduler_job_run_details
-ORDER BY log_date DESC
-FETCH FIRST 50 ROWS ONLY;
-```
-
-Match the job name in the team-history row to the scheduler output. No
-matching job while the task remains `RUNNING` is evidence of a database agent
-state-transition problem before any registered tool invocation.
-
-## Target-schema profile endpoint diagnosis
-
-Run as the target schema when profile creation succeeds but its live test fails.
-This shows the non-secret profile attributes that control provider routing.
-
+Profile Attributes:
 ```sql
 SELECT attribute_name, attribute_value
 FROM user_cloud_ai_profile_attributes
@@ -445,116 +160,431 @@ WHERE profile_name = 'A2A_PROFILE'
 ORDER BY attribute_name;
 ```
 
-For a comparison between a working and a failing target schema, run as ADMIN:
-
-```sql
-SELECT owner, profile_name, attribute_name, attribute_value
-FROM dba_cloud_ai_profile_attributes
-WHERE owner IN (UPPER('DEMO_SALES'), UPPER('<OTHER_TARGET_SCHEMA>'))
-  AND profile_name = 'A2A_PROFILE'
-ORDER BY owner, attribute_name;
+Example output:
+```
+ATTRIBUTE_NAME        ATTRIBUTE_VALUE                                                                     
+_____________________ ___________________________________________________________________________________ 
+credential_name       OCI$RESOURCE_PRINCIPAL                                                              
+model                 xai.grok-4.3                                                                        
+oci_compartment_id    ocid1.compartment.oc1..xxxxxx    
+provider              oci                                                                                 
+region                us-ashburn-1   
 ```
 
-For OCI Generative AI, verify `provider`, `credential_name`,
-`oci_compartment_id`, `region`, and `model`. If the live test reports a URL
-that still contains the literal `my$cloud_domain`, record the database version,
-profile attributes, and exact error. That is an unresolved database-side OCI
-endpoint substitution, not an OAuth or A2A token failure.
+An API-key profile normally has a user credential such as `GENAI_CRED`.
+Resource Principal profiles use `OCI$RESOURCE_PRINCIPAL` but do not create a
+user-owned credential row.
 
-## Database-native Agent runtime diagnosis
+### UI: Target Select AI — live profile test
 
-Run these as the target schema, for example `DEMO_SALES`. They isolate the
-database agent runtime from the external A2A transport.
+As target user, verify the Select AI Profile, Credential, and Model all in a single query.
 
 ```sql
--- Set the published team for this SQLcl session.
-EXEC DBMS_CLOUD_AI_AGENT.SET_TEAM('ORACLE_AI_DATABASE_AGENT');
-
--- SQLcl may interpret ? as a JDBC bind placeholder; start without it.
-select ai agent who are you;
+SELECT DBMS_CLOUD_AI.GENERATE(
+  prompt       => 'Reply exactly: Target Select AI works.',
+  profile_name => 'A2A_PROFILE',
+  action       => 'chat'
+) AS model_response
+FROM dual;
 ```
 
-The installed object names are intentionally different:
+Expected Output:
+```
+MODEL_RESPONSE             
+__________________________ 
+Target Select AI works.    
+```
 
-- team: `ORACLE_AI_DATABASE_AGENT`
-- task: `ORACLE_AI_DATABASE_TASK`
-- database agent: `ORACLE_AI_DATABASE_AGENT_ROLE`
+**IMPORTANT:** If this is not working, or hangs, stop here and fix it before continuing.  You may need to try a different model, test GenAI chat in the OCI Console "Playground" for your region, set up additional IAM permissions for Resource Principal, or verify an API Key.  
 
-Use the definitions to confirm the actual profile, task, and team wiring:
+## Setup → Published teams
+
+Published-team refresh is external A2A discovery and requires OAuth; it is not
+a dictionary view. First validate the owning schema's installed team.
+
+### UI: Published teams — installed team
+
+**VERIFY — target schema.**
 
 ```sql
 SET LONG 1000000
 SET LONGCHUNKSIZE 32767
-SET LINESIZE 32767
 SET PAGESIZE 0
+SET LINESIZE 32767
 
-SELECT DBMS_CLOUD_AI_AGENT.GET_DEFINITION(
-  object_type => 'AGENT',
-  object_name => 'ORACLE_AI_DATABASE_AGENT_ROLE'
-) FROM dual;
-
-SELECT DBMS_CLOUD_AI_AGENT.GET_DEFINITION(
-  object_type => 'TASK',
-  object_name => 'ORACLE_AI_DATABASE_TASK'
-) FROM dual;
-
-SELECT DBMS_CLOUD_AI_AGENT.GET_DEFINITION(
-  object_type => 'TEAM',
-  object_name => 'ORACLE_AI_DATABASE_AGENT'
-) FROM dual;
+SELECT DBMS_CLOUD_AI_AGENT.LIST_TEAMS() AS available_teams FROM dual;
 ```
 
-When a SQLcl or A2A request remains `RUNNING`, use the supported user history
-views first. No tool-history rows means the runtime has not invoked `SQL_TOOL`,
-`DISTINCT_VALUES_CHECK`, `RANGE_VALUES_CHECK`, or `GENERATE_CHART` yet.
+For Sales Data:
 
 ```sql
-SELECT *
-FROM user_ai_agent_team_history
-ORDER BY start_date DESC;
-
-SELECT *
-FROM user_ai_agent_task_history
-ORDER BY start_date DESC;
-
-SELECT *
-FROM user_ai_agent_tool_history
-ORDER BY start_date DESC;
+SELECT DBMS_CLOUD_AI_AGENT.GET_DEFINITION(
+  object_type => 'AGENT', object_name => 'ORACLE_AI_DATABASE_AGENT_ROLE'
+) FROM dual;
+SELECT DBMS_CLOUD_AI_AGENT.GET_DEFINITION(
+  object_type => 'TASK', object_name => 'ORACLE_AI_DATABASE_TASK'
+) FROM dual;
+SELECT DBMS_CLOUD_AI_AGENT.GET_DEFINITION(
+  object_type => 'TEAM', object_name => 'ORACLE_AI_DATABASE_AGENT'
+) FROM dual;
 ```
 
-While a target-schema SQLcl prompt is actively hung, use a separate ADMIN
-window to capture its database session and private-memory state twice, roughly
-30 seconds apart:
+For Database Provisioning, substitute `DATABASE_ADVISOR`,
+`PROVISION_DATABASE_TASK`, and `DATABASE_PROVISIONING_TEAM`.
+
+**VERIFY — ADMIN.** Cross-schema status and compiler diagnostics:
 
 ```sql
-SELECT s.sid,
-       s.serial#,
-       s.status,
-       s.event,
-       s.wait_class,
-       s.seconds_in_wait,
-       s.sql_id,
-       s.module,
-       s.action,
-       ROUND(p.pga_used_mem / 1024 / 1024, 1) AS pga_used_mb,
-       ROUND(p.pga_alloc_mem / 1024 / 1024, 1) AS pga_alloc_mb,
-       ROUND(p.pga_freeable_mem / 1024 / 1024, 1) AS pga_freeable_mb
-FROM v$session s
-JOIN v$process p ON p.addr = s.paddr
-WHERE s.username = UPPER('DEMO_SALES')
-ORDER BY s.logon_time DESC;
+SELECT owner, object_name, object_type, status
+FROM dba_objects
+WHERE owner IN ('DEMO_SALES', 'PROV2')
+  AND object_name IN (
+    'SELECTAI_AGENT_CONFIG', 'ORACLE_AI_DATA_RETRIEVAL_FUNCTIONS',
+    'ORACLE_AI_DATABASE_AGENT_ROLE', 'ORACLE_AI_DATABASE_TASK',
+    'ORACLE_AI_DATABASE_AGENT', 'DATABASE_ADVISOR',
+    'PROVISION_DATABASE_TASK', 'DATABASE_PROVISIONING_TEAM',
+    'LIST_SUBSCRIBED_REGIONS', 'LIST_ADBS_PROVISIONING_OPTIONS',
+    'ADBS_PROVISIONING_TOOL', 'LOG_ADBS_PROVISIONING_REQUEST',
+    'ADBS_PROVISIONING_REQUEST_LOG'
+  )
+ORDER BY owner, object_type, object_name;
+
+SELECT owner, name, type, line, position, text
+FROM dba_errors
+WHERE owner IN ('DEMO_SALES', 'PROV2')
+  AND name IN ('ORACLE_AI_DATA_RETRIEVAL_FUNCTIONS', 'PROVISION_ADBS_TOOL')
+ORDER BY owner, name, sequence;
 ```
 
-If direct `DBMS_CLOUD_AI.GENERATE` succeeds but this native agent test and A2A
-chat both remain `RUNNING`, preserve these query results with the database
-version for the database-service investigation. Do not treat it as an OAuth
-or local-console failure.
+## Setup → Select AI Config
 
-For a complete end-user-to-ADMIN SQLcl walkthrough of the installed tools,
-agent, task, team, and a `RUNNING` investigation, see
-[AGENT_TEAM_RUNBOOK.md](AGENT_TEAM_RUNBOOK.md).
+`SELECTAI_AGENT_CONFIG` is an optional, sample-owned table. It is not created
+by Select AI profile setup and will not exist for every Oracle sample. Use the
+**Select AI Agent Configs** page only after the sample's documented SQLcl
+installation has created this table.
 
-## Test log
+### UI: Select AI Agent Configs — inspect mappings
 
-Use this section for environment-specific prompts, expected results, and SQL
-observations. Do not record credentials or tokens.
+**VERIFY — target schema.** Confirm whether the installed sample owns the
+optional configuration table, then display the agent-specific values it uses.
+
+This verifies if the table exists:
+```sql
+SELECT table_name
+FROM user_tables
+WHERE table_name = 'SELECTAI_AGENT_CONFIG';
+```
+
+Keys in the table if it exists will map to the JSON that some of the samples ask for.  The app also
+exposes the ability to update or add keys.  These can be read by the functions, agents, or teams.
+```sql
+SELECT "AGENT", "KEY", "VALUE"
+FROM selectai_agent_config
+ORDER BY "AGENT", "KEY";
+```
+Example:
+```
+AGENT                 KEY                          VALUE                     
+_____________________ ____________________________ _________________________ 
+OCI_OBJECT_STORAGE    CREDENTIAL_NAME              OCI$RESOURCE_PRINCIPAL    
+OCI_OBJECT_STORAGE    ENABLE_RESOURCE_PRINCIPAL    YES       
+```
+
+To look for or verify a specific key:
+
+```sql
+SELECT "VALUE" AS profile_name
+FROM selectai_agent_config
+WHERE "AGENT" = 'OCI_OBJECT_STORAGE'
+  AND "KEY" = 'CREDENTIAL_NAME';
+```
+Example:
+```
+PROFILE_NAME              
+_________________________ 
+OCI$RESOURCE_PRINCIPAL    
+```
+
+### UI: Select AI Agent Configs — add or update a key
+
+**ACTION — target schema.** These statements affect only one named agent/key
+pair; they do not replace all configuration. First inspect the mapping above.
+Use `INSERT` when the key is new, or `UPDATE` when it already exists. Replace
+all example values; use secret OCIDs rather than secret material.
+
+Add a new key:
+
+```sql
+INSERT INTO selectai_agent_config ("KEY", "VALUE", "AGENT")
+VALUES ('MY_CONFIG_KEY', 'my value', 'ORACLE_AI_DATABASE_AGENT');
+
+COMMIT;
+```
+
+Change an existing key:
+
+```sql
+UPDATE selectai_agent_config
+SET "VALUE" = 'A2A_PROFILE'
+WHERE "AGENT" = 'ORACLE_AI_DATABASE_AGENT'
+  AND "KEY" = 'AGENT_AI_PROFILE';
+
+COMMIT;
+```
+
+SQLcl reports the number of updated rows. If `UPDATE` reports `0 rows`, the
+key does not exist; use the `INSERT` example instead.
+
+Verify the exact row after either change:
+
+```sql
+SELECT "AGENT", "KEY", "VALUE"
+FROM selectai_agent_config
+WHERE "AGENT" = 'ORACLE_AI_DATABASE_AGENT'
+  AND "KEY" = 'AGENT_AI_PROFILE';
+```
+
+### UI: Select AI Agent Configs — delete a key
+
+**ACTION — target schema.** Inspect the row first, then delete only the exact
+agent/key pair. Deleting `AGENT_AI_PROFILE` can make an installed sample fail
+until its correct profile mapping is restored.
+
+```sql
+SELECT "AGENT", "KEY", "VALUE"
+FROM selectai_agent_config
+WHERE "AGENT" = 'ORACLE_AI_DATABASE_AGENT'
+  AND "KEY" = 'AGENT_AI_PROFILE';
+
+DELETE FROM selectai_agent_config
+WHERE "AGENT" = 'ORACLE_AI_DATABASE_AGENT'
+  AND "KEY" = 'AGENT_AI_PROFILE';
+
+COMMIT;
+```
+
+## A2A Testing → OAuth, Team selection, and Chat
+
+### UI: OAuth · Get Token
+
+OAuth callback/exchange are intentionally not reproduced in SQL. Follow
+[OAUTH_VALIDATION.md](OAUTH_VALIDATION.md) for the command-line flow. The
+external token must belong to the target schema that owns the team.
+
+### UI: Team selection — native agent call
+
+To test team existence, use the target schema as the user.
+
+```sql
+SELECT DBMS_CLOUD_AI_AGENT.LIST_TEAMS() AS available_teams FROM dual;
+```
+Example:
+```
+AVAILABLE_TEAMS                                         
+_______________________________________________________ 
+[{"name":"OCI_OBJECTSTORE_TEAM","description":null}]    
+```
+
+Now you can select the team and test the AI Profile and Credential by asking a question.
+
+```sql
+EXEC DBMS_CLOUD_AI_AGENT.SET_TEAM('OCI_OBJECTSTORE_TEAM');
+select ai agent who are you;
+```
+Example:
+```
+SQL> EXEC DBMS_CLOUD_AI_AGENT.SET_TEAM('OCI_OBJECTSTORE_TEAM');
+
+PL/SQL procedure successfully completed.
+
+SQL> select ai agent who are you;
+
+RESPONSE                                                                                                                                                                                                                                                                                 
+________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________________ 
+I am OCI_OBJECT_STORAGE_ADVISOR, an OCI Object Storage Advisor and Automation Specialist. I assist with bucket and object management, lifecycle policies, retention rules, replication, multipart uploads, and work request monitoring in Oracle Cloud Infrastructure Object Storage.  
+```
+
+### UI: Chat — task and tool history
+
+As the target user, you can see the chat history.  For example, if you chat with the agent in the app,
+you will see that those results here.
+
+```sql
+SELECT * FROM user_ai_agent_team_history
+ORDER BY start_date DESC FETCH FIRST 5 ROWS ONLY;
+```
+Executed tasks appear here:
+```sql
+SELECT * FROM user_ai_agent_task_history
+ORDER BY start_date DESC FETCH FIRST 10 ROWS ONLY;
+```
+Tool calls from the agent:
+```sql
+SELECT * FROM user_ai_agent_tool_history
+ORDER BY start_date DESC FETCH FIRST 30 ROWS ONLY;
+```
+
+Narrow down to a specific conversation by using the EXEC_ID shown for a specific conversation:
+```sql
+SELECT * FROM user_ai_agent_task_history
+WHERE team_exec_id = 'paste-team-exec-id-here'
+ORDER BY start_date;
+
+SELECT * FROM user_ai_agent_tool_history
+WHERE team_exec_id = 'paste-team-exec-id-here'
+ORDER BY start_date;
+```
+
+Read it as `team history → task history → tool history → function result`.
+No tool row means a task is still reasoning, waiting for human input, or
+failed before selecting a tool; it does not identify a broken tool.
+
+**VERIFY — ADMIN.** Cross-schema task correlation and a running-call check:
+
+```sql
+SELECT * FROM dba_ai_agent_task_history
+WHERE task_owner = 'DEMO_SALES'
+  AND team_exec_id = 'paste-team-exec-id-here'
+ORDER BY start_date DESC;
+
+SELECT * FROM dba_ai_agent_tool_history
+WHERE tool_owner = 'DEMO_SALES'
+  AND team_exec_id = 'paste-team-exec-id-here'
+ORDER BY start_date DESC;
+
+SELECT owner, job_name, session_id, running_instance, elapsed_time
+FROM dba_scheduler_running_jobs
+ORDER BY elapsed_time DESC;
+
+SELECT sid, serial#, username, status, event, wait_class,
+       seconds_in_wait, sql_id, module, action
+FROM v$session
+WHERE username IN ('DEMO_SALES', 'PROV2', 'ADMIN')
+ORDER BY logon_time DESC;
+```
+
+If a release has different history columns, inspect first:
+
+```sql
+SELECT table_name, column_name, column_id, data_type
+FROM all_tab_columns
+WHERE table_name IN (
+  'USER_AI_AGENT_TEAM_HISTORY', 'USER_AI_AGENT_TASK_HISTORY',
+  'USER_AI_AGENT_TOOL_HISTORY', 'DBA_AI_AGENT_TEAM_HISTORY',
+  'DBA_AI_AGENT_TASK_HISTORY', 'DBA_AI_AGENT_TOOL_HISTORY'
+)
+ORDER BY table_name, column_id;
+```
+
+## Setup → cleanup pages
+
+Follow the UI cleanup order: delete team, clean target resources, then delete
+the schema/database when testing is complete.
+
+### Delete Team or Agent (not in UI)
+
+The UI does not specifically surface a way to delete a team or agent, or the associated tools. 
+However, this guide shows some queries to do so here.  This is primarily for debugging or retrying
+configuration.  
+
+```sql
+SELECT DBMS_CLOUD_AI_AGENT.LIST_TEAMS() AS available_teams FROM dual;
+```
+
+### UI: Delete target schema
+
+As `ADMIN` user: 
+The UI uses`DROP USER <selected schema> CASCADE`
+
+**NOTE:** Any OCI IAM policies remain outside the database and are not affected.
+
+As `ADMIN` you can check for users after the delete schema operation from the app has completed - in this example you are checking for 2 separate target schemas.
+
+```sql
+SELECT username, account_status
+FROM dba_users
+WHERE username IN ('S1', 'S2');
+```
+
+If a user exists, you can also check for objects owned by that user.  Depending on the 
+sample and what objects are created, you may see different types of objects.
+```sql
+SELECT owner, object_name, object_type, status
+FROM dba_objects
+WHERE owner IN ('S1', 'S3')
+ORDER BY owner, object_type, object_name;
+```
+
+For example, if the Object Storage sample was installed:
+```
+OWNER    OBJECT_NAME                                OBJECT_TYPE                STATUS     
+________ __________________________________________ __________________________ __________ 
+S3       SELECTAI_AGENT_CONFIG_PK                   INDEX                      VALID      
+S3       SELECTAI_AGENT_CONFIG_UK                   INDEX                      VALID      
+S3       SYS_IL0000147393C00003$$                   INDEX                      VALID      
+S3       OCI_OBJECTSTORE_TEAM_TASK_0                JOB                        VALID      
+S3       SYS_LOB0000147393C00003$$                  LOB                        VALID      
+S3       OCI_OBJECT_STORAGE_AGENTS                  PACKAGE                    VALID      
+S3       OCI_OBJECT_STORAGE_AGENTS                  PACKAGE BODY               VALID      
+S3       INITIALIZE_OBJECT_STORAGE_AGENT            PROCEDURE                  INVALID    
+S3       INITIALIZE_OBJECT_STORAGE_TOOLS            PROCEDURE                  VALID      
+S3       INSTALL_OCI_OBJECTSTORE_AGENT              PROCEDURE                  VALID      
+S3       OCI_OBJECTSTORE_TEAM_SEQUENTIAL_PROGRAM    PROGRAM                    VALID      
+S3       ISEQ$$_147393                              SEQUENCE                   VALID      
+S3       AI$A2A_PROFILE                             SQL TRANSLATION PROFILE    VALID      
+S3       AI$AGENT$OCI_OBJECTSTORE_TEAM              SQL TRANSLATION PROFILE    VALID      
+
+OWNER    OBJECT_NAME              OBJECT_TYPE    STATUS    
+________ ________________________ ______________ _________ 
+S3       SELECTAI_AGENT_CONFIG    TABLE          VALID     
+
+15 rows selected. 
+```
+
+**NOTE:** Manually dropping a user with cascade is safe for the demo, as long as you then create a 
+new target schema and connect to it from the app.
+
+### UI: Resource Principal cleanup
+
+Run as `ADMIN`:
+
+```sql
+EXEC DBMS_CLOUD_ADMIN.DISABLE_RESOURCE_PRINCIPAL(username => 'DEMO_SALES');
+```
+Check again for resource principal, looking for the target user:
+```sql
+SELECT grantee, owner, table_name
+FROM dba_tab_privs
+WHERE owner = 'ADMIN'
+  AND table_name = 'OCI$RESOURCE_PRINCIPAL';
+```
+Example output (showing S1 user):
+```GRANTEE             OWNER    TABLE_NAME                
+___________________ ________ _________________________ 
+C##CLOUD$SERVICE    ADMIN    OCI$RESOURCE_PRINCIPAL    
+GRAPH$METADATA      ADMIN    OCI$RESOURCE_PRINCIPAL    
+ODI_REPO_USER       ADMIN    OCI$RESOURCE_PRINCIPAL    
+S1                  ADMIN    OCI$RESOURCE_PRINCIPAL    
+```
+
+To remove ALL resource principals:
+```sql
+EXEC DBMS_CLOUD_ADMIN.DISABLE_RESOURCE_PRINCIPAL();
+```
+Verify:
+```sql
+SELECT owner, credential_name
+FROM dba_credentials
+WHERE credential_name = 'OCI$RESOURCE_PRINCIPAL';
+```
+Should show:
+```
+no rows selected
+```
+
+### UI: Delete Database
+
+Use the UI’s **Delete database** page, OCI Console, or OCI CLI only after
+retaining needed diagnostics and disposing of local wallet files securely.
+
+You must disconnect from all SQLcL sessions before doing this.

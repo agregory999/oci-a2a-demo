@@ -20,7 +20,7 @@
       {% endif %}
       <div class="chat-log" data-chat-log>
         {% for message in chat_history %}
-          <div class="message {{message.role}}"><small>{{message.role|title}}</small>{{message.text}}</div>
+          <div class="message {{message.role}}"><small>{{message.role|title}}{% if message.timestamp %} · {{message.timestamp}}{% endif %}</small>{{message.text}}</div>
         {% else %}
           <p class="hint">No messages in this browser session yet.</p>
         {% endfor %}
@@ -30,10 +30,14 @@
         <form method="post" action="{{url_for('inferencing_task_status_route')}}"><p><button>Check task status</button></p></form>
       {% endif %}
       {% if select_ai_debug_enabled and last_a2a_task_diagnostic %}
-        <details><summary>Last task diagnostic{% if last_a2a_task_id %} — {{last_a2a_task_id}}{% endif %}</summary>
-          <p class="hint">Oracle task response retained in this browser session. Do not copy sensitive prompts or results into tickets.</p>
-          <pre>{{last_a2a_task_diagnostic|tojson(indent=2)}}</pre>
+        <details open><summary>Task diagnostic{% if last_a2a_task_id %} — {{last_a2a_task_id}}{% endif %}</summary>
+          <p class="hint">This summary exposes task state and error fields without rendering prompts or provider data.</p>
+          <pre>{{a2a_task_diagnostic_summary|tojson(indent=2)}}</pre>
+          <details><summary>Complete redacted A2A response</summary><pre>{{last_a2a_task_diagnostic|tojson(indent=2)}}</pre></details>
         </details>
+      {% endif %}
+      {% if select_ai_debug_enabled and last_a2a_request %}
+        <details><summary>Last A2A request (no bearer token)</summary><p class="hint">For an approval response, confirm the method is <code>tasks/send</code> and that <code>params.taskId</code> is the pending task.</p><pre>{{last_a2a_request|tojson(indent=2)}}</pre></details>
       {% endif %}
       <form method="post" action="{{url_for('inferencing_chat_route')}}">
         <label>Message</label>
@@ -47,6 +51,7 @@
     <h2>Chat</h2>
     <p>Approval requests use the same A2A task and conversation context. Reply in this chat; do not start a new conversation until the task completes or is no longer needed.</p>
     <p>Enable debug mode only when you need raw task diagnostics.</p>
+    {% include "includes/sidebar_status.html" %}
   </aside>
 </div>
 {% endblock %}

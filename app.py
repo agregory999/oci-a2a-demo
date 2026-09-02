@@ -51,8 +51,6 @@ SELECT_AI_SETTING_KEYS = (
 ADMIN_SETTING_KEYS = ("service_name", "admin_username")
 PERSISTED_SETTING_KEYS = PROVISIONING_SETTING_KEYS + SELECT_AI_SETTING_KEYS + ADMIN_SETTING_KEYS + ("database_ocid", "known_teams", "target_schema", "oauth_clients")
 SAMPLE_SCHEMA_SETTING_KEYS = ("target_schema",)
-ORACLE_SAMPLE_BASE_URL = "https://raw.githubusercontent.com/oracle-devrel/oracle-autonomous-database-samples/main/google-gemini-marketplace-agents/oracle_ai_database_agent"
-SAMPLES_ROOT = Path(__file__).with_name("samples")
 SAMPLE_TABLES = ("DEMO_CUSTOMERS", "DEMO_PRODUCTS", "DEMO_ORDERS")
 A2A_FEATURE_TAG = json.dumps({"adb$feature": json.dumps({"name": "a2a_server", "enable": True}, separators=(",", ":"))})
 
@@ -98,8 +96,17 @@ def request_secret(state: dict[str, object], form_name: str, state_name: str, la
 
 
 def set_section_feedback(state: dict[str, object], section: str, message: str, category: str) -> None:
-    """Keep the latest result beside the workflow that produced it."""
+    """Keep local feedback and a bounded, reverse-chronological activity log."""
     state.setdefault("section_feedback", {})[section] = {"message": message, "category": category}
+    activity_log = state.setdefault("activity_log", [])
+    if isinstance(activity_log, list):
+        activity_log.insert(0, {
+            "section": section,
+            "message": message,
+            "category": category,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        })
+        del activity_log[100:]
 
 
 def setup_status_items(
@@ -119,35 +126,28 @@ def setup_status_items(
     lifecycle = str(state.get("wallet_status") or "")
     profile_name = str(select_ai_settings.get("profile_name") or "")
     listed_profiles = {str(value).upper() for value in state.get("select_ai_profiles", [])}
-    profile_verified = bool(state.get("select_ai_checklist", {}).get("AI profile")) or bool(profile_name and profile_name.upper() in listed_profiles)
+    profile_verified = bool(profile_name) or bool(state.get("select_ai_checklist", {}).get("AI profile")) or bool(profile_name and profile_name.upper() in listed_profiles)
     target_schema = str(state.get("sample_settings", {}).get("target_schema") or provision_settings.get("target_schema") or "")
     credential_name = str(select_ai_settings.get("credential_name") or "")
-    profile_detail = " · ".join(part for part in (profile_name, credential_name) if part) or "No profile selected"
-    token_user = str(connection_settings.get("username") or "")
-    selected_team = str(state.get("selected_team") or "")
-    token_details = state.get("oauth_token_details", {})
-    token_detail = selected_team or token_user or "No database user selected"
-    if state.get("access_token") and isinstance(token_details, dict):
-        expires_at = token_details.get("expires_at")
-        expires_in = max(0, int(float(expires_at) - time.time())) if expires_at is not None else token_details.get("expires_in")
-        scope = token_details.get("scope")
-        parts = [f"Expires in {expires_in}s" if expires_in is not None else "Token acquired", str(scope) if scope else ""]
-        token_detail = " · ".join(part for part in parts if part)
-        source = str(state.get("oauth_token_source") or "")
-        if source:
-            token_detail = f"{token_detail} · {source}"
+    if str(select_ai_settings.get("provider") or "") == "oci_resource_principal":
+        credential_name = "OCI$RESOURCE_PRINCIPAL"
+    profile_detail = " - ".join(part for part in (profile_name, credential_name) if part) or "No profile selected"
     oauth_clients = state.get("oauth_clients", [])
     oauth_detail = str(oauth_clients[-1].get("client_name") or oauth_clients[-1].get("client_id") or "") if isinstance(oauth_clients, list) and oauth_clients else "No client registered"
     wallet_detail = str(Path(wallet_dir).parent) if wallet_dir else "No local wallet"
+    installed_count = len(state.get("installed_teams", []))
+    published_count = len(state.get("agents", []))
+    team_count = published_count or installed_count
+    team_detail = f"{team_count} team(s) known" if team_count else "No teams checked"
     return [
         {"tab": "profile", "label": "OCI profile", "detail": str(connection_settings.get("profile") or provision_settings.get("provision_profile") or "Not selected"), "done": bool(connection_settings.get("profile") or provision_settings.get("provision_profile"))},
         {"tab": "wallet", "label": "Wallet downloaded", "detail": wallet_detail, "title": wallet_dir or "", "done": bool(wallet_dir)},
-        {"tab": "wallet", "label": "ADMIN connection", "detail": str(admin_settings.get("service_name") or "Not tested"), "done": bool(state.get("admin_connection_ok"))},
-        {"tab": "select-ai", "label": "Select AI profile", "detail": profile_detail, "done": profile_verified},
-        {"tab": "sample-data", "label": "Target schema", "detail": target_schema or "No sample schema selected", "done": bool(state.get("agent_readiness_ok") or state.get("sample_data_ready"))},
-        {"tab": "oauth-clients", "label": "OAuth client", "detail": oauth_detail, "done": oauth_detail != "No client registered"},
-        {"tab": "token", "label": "OAuth token", "detail": token_detail, "done": bool(state.get("access_token"))},
         {"tab": "provision", "label": "Database lifecycle", "detail": lifecycle or "Not checked", "done": lifecycle.upper() == "AVAILABLE"},
+        {"tab": "wallet", "label": "DB connection (ADMIN)", "detail": str(admin_settings.get("service_name") or "Not tested"), "done": bool(state.get("admin_connection_ok"))},
+        {"tab": "target-connection", "label": "DB connection (Target)", "detail": str(state.get("target_connection_summary") or "Not tested"), "done": bool(state.get("target_connection_ok"))},
+        {"tab": "select-ai", "label": "Select AI profile", "detail": profile_detail, "done": profile_verified},
+        {"tab": "agent-teams", "label": "Agent Teams", "detail": team_detail, "done": bool(team_count)},
+        {"tab": "oauth-clients", "label": "OAuth registration", "detail": oauth_detail, "done": oauth_detail != "No client registered"},
     ]
 
 
@@ -190,13 +190,9 @@ def render_workspace(template_name: str, section: str):
     if not settings.get("database_ocid") and isinstance(state.get("provisioned_database"), dict):
         settings["database_ocid"] = state["provisioned_database"].get("id", "")
     select_ai_settings.setdefault("oci_region", settings.get("region", ""))
-    if not state.get("agents") and provision_settings.get("known_teams"):
-        try:
-            remembered_teams = json.loads(str(provision_settings["known_teams"]))
-            if isinstance(remembered_teams, list):
-                state["agents"] = remembered_teams
-        except ValueError:
-            pass
+    # Published teams are external, token-scoped state. Never repopulate this
+    # list from remembered settings: the user must refresh against the current
+    # target-schema OAuth token before a team is considered selectable.
     if "oauth_clients" not in state:
         try:
             saved_clients = json.loads(str(provision_settings.get("oauth_clients", "[]")))
@@ -212,22 +208,23 @@ def render_workspace(template_name: str, section: str):
         provisioned_database=state.get("provisioned_database"), delete_request=state.get("delete_request"),
         provision_settings=provision_settings, wallet_settings=wallet_settings, wallet_dir=wallet_dir,
         wallet_database_ocid=wallet_database_ocid, wallet_status=state.get("wallet_status"),
-        admin_connection_ok=state.get("admin_connection_ok", False), admin_connection_summary=state.get("admin_connection_summary", ""),
-        masked_secret=MASKED_SECRET, admin_password_cached=bool(state.get("admin_password")), wallet_password_cached=bool(state.get("admin_wallet_password")), target_schema_password_cached=any(str(key).startswith("target_schema_password:") for key in state),
+        admin_connection_ok=state.get("admin_connection_ok", False), admin_connection_summary=state.get("admin_connection_summary", ""), target_connection_ok=state.get("target_connection_ok", False), target_connection_summary=state.get("target_connection_summary", ""),
+        masked_secret=MASKED_SECRET, admin_password_cached=bool(state.get("admin_password")), wallet_password_cached=bool(state.get("admin_wallet_password")), target_schema_password_cached=any(str(key).startswith("target_schema_password:") for key in state), resource_principal_checked=state.get("resource_principal_checked", {}),
         admin_settings=admin_settings, select_ai_settings=select_ai_settings,
         sample_settings=sample_settings, sample_tables=state.get("sample_tables", []), sample_data_ready=state.get("sample_data_ready", False), target_select_ai_ready=state.get("target_select_ai_ready", False), target_select_ai_profiles=state.get("target_select_ai_profiles", []), target_select_ai_credentials=state.get("target_select_ai_credentials", []), target_select_ai_privileges=state.get("target_select_ai_privileges", []),
         select_ai_checklist=state.get("select_ai_checklist", {}), select_ai_profiles=state.get("select_ai_profiles", []),
         select_ai_profile_ready=(bool(state.get("select_ai_checklist", {}).get("AI profile")) or bool(select_ai_settings.get("profile_name") and str(select_ai_settings.get("profile_name")).upper() in {str(value).upper() for value in state.get("select_ai_profiles", [])})),
         select_ai_credentials=state.get("select_ai_credentials", []), select_ai_credential_attributes=state.get("select_ai_credential_attributes", {}),
         select_ai_profile_attributes=state.get("select_ai_profile_attributes", {}), select_ai_debug=state.get("select_ai_debug", []),
-        select_ai_debug_enabled=SELECT_AI_DEBUG, agent_install_debug=state.get("agent_install_debug", []), agents=state.get("agents", []), selected_card=state.get("selected_card"),
-        section_feedback=state.get("section_feedback", {}), selected_team=state.get("selected_team", ""),
+        select_ai_debug_enabled=SELECT_AI_DEBUG, agent_install_debug=state.get("agent_install_debug", []), sample_sql_preview=state.get("sample_sql_preview"), selected_sample_name=state.get("selected_sample_name", ""), last_a2a_request=state.get("last_a2a_request", {}), agents=state.get("agents", []), installed_teams=state.get("installed_teams", []), installed_team_schema=state.get("installed_team_schema", ""), target_agent_config=state.get("target_agent_config", []), selected_card=state.get("selected_card"),
+        section_feedback=state.get("section_feedback", {}), activity_log=state.get("activity_log", []), selected_team=state.get("selected_team", ""),
         chat_history=state.get("chat_history", []),
         pending_a2a_task_id=state.get("pending_a2a_task_id", ""),
         a2a_context_id=state.get("a2a_context_id", ""),
         last_a2a_task_state=state.get("last_a2a_task_state", ""),
         last_a2a_task_id=state.get("last_a2a_task_id", ""),
         last_a2a_task_diagnostic=state.get("last_a2a_task_diagnostic", {}),
+        a2a_task_diagnostic_summary=a2a_diagnostic_summary(state.get("last_a2a_task_diagnostic", {})),
         last_discovery=state.get("last_discovery", {}),
         access_token=bool(state.get("access_token")), oauth_token_details=state.get("oauth_token_details", {}), oauth_token_source=state.get("oauth_token_source", ""),
         oauth_clients=state.get("oauth_clients", []), oauth_one_time_secret=state.pop("oauth_one_time_secret", None),
@@ -235,11 +232,11 @@ def render_workspace(template_name: str, section: str):
         setup_status=setup_status_items(state, settings, provision_settings, select_ai_settings, admin_settings, wallet_dir),
         testing_status=testing_status_items(state),
         dock_mode="testing" if section.startswith("test") else "setup",
-        setup_ready=bool(state.get("agent_readiness_ok") and state.get("sample_agent_installed")),
+        setup_ready=bool(state.get("demo_verified")),
         demo_verification=state.get("demo_verification", []),
         demo_verified=bool(state.get("demo_verified")),
         nav_visited=set(visited_navigation),
-        samples=sample_catalog(),
+        samples=[],
     )
 
 
@@ -468,18 +465,34 @@ def refresh_agents(
         raise ValueError("Get a bearer token on the Setup page before refreshing published teams.")
     endpoint = Connection(region, database_ocid, "", "").agents_url
     claims = safe_jwt_claims(str(token))
+    target_schema = str(state.get("sample_settings", {}).get("target_schema") or "").upper()
+    token_subject = str(claims.get("sub") or "")
     diagnostic: dict[str, object] = {
         "endpoint": endpoint,
         "region": region,
         "database_ocid": database_ocid,
         "token_source": token_source or str(state.get("oauth_token_source") or "Unknown"),
-        "token_subject": claims.get("sub", "Unavailable"),
+        "token_subject": token_subject or "Unavailable",
+        "expected_target_schema": target_schema or "Unavailable",
         "token_scope": claims.get("scope", "Unavailable"),
         "token_database_ocid": claims.get("cloud_database_name", "Unavailable"),
     }
     token_database = claims.get("cloud_database_name", "")
     if token_database:
         diagnostic["token_database_matches_request"] = token_database.upper() == database_ocid.upper()
+    if target_schema and token_subject and token_subject.upper() != target_schema:
+        diagnostic["result"] = "Target schema mismatch"
+        state["last_discovery"] = diagnostic
+        state["agents"] = []
+        state.pop("selected_card", None)
+        raise ValueError(
+            f"External OAuth token belongs to {token_subject}, but the selected target schema is {target_schema}. "
+            "Obtain a token for the selected target schema before refreshing published teams."
+        )
+    # Never display a previous discovery result while this request is in flight
+    # or after a failed request for a different token/schema.
+    state["agents"] = []
+    state.pop("selected_card", None)
     response = requests.get(endpoint, headers=oracle_headers(str(token)), timeout=30)
     diagnostic["http_status"] = response.status_code
     if not response.ok:
@@ -616,22 +629,45 @@ def database_connection(state: dict[str, object]):
     )
 
 
-def target_schema_connection(state: dict[str, object], username: str, password: str):
-    """Connect as the target schema using the already-tested wallet configuration."""
+def target_schema_connection(
+    state: dict[str, object], username: str, password: str, service_name: str = "", wallet_password: str = ""
+):
+    """Connect as a target schema with a wallet, independently of ADMIN login.
+
+    When ADMIN has been tested, its verified wallet context is reused. Otherwise
+    callers supply the wallet service alias and password; no ADMIN password or
+    ADMIN database connection is required for an end-user action.
+    """
     details = state.get("admin_connection")
-    if not isinstance(details, dict):
-        raise ValueError("Download a wallet and test the ADMIN connection first.")
     username = checked_identifier(username, "Target schema")
     if not password:
         raise ValueError("Enter the target-schema password for this one-time setup.")
+    if isinstance(details, dict):
+        resolved_service = str(details["service_name"])
+        resolved_wallet_dir = str(details["wallet_dir"])
+        resolved_wallet_password = str(details["wallet_password"])
+    else:
+        stored = load_last_settings()
+        settings = state.get("admin_settings", {})
+        settings = settings if isinstance(settings, dict) else {}
+        resolved_service = service_name.strip() or str(settings.get("service_name") or stored.get("service_name") or "")
+        wallet_dir = state.get("wallet_dir") or existing_wallet_directory(str(state.get("wallet_settings", {}).get("database_ocid") or stored.get("database_ocid") or "")) or discovered_wallet_directory()
+        resolved_wallet_dir = str(wallet_dir) if wallet_dir else ""
+        resolved_wallet_password = wallet_password or str(state.get("admin_wallet_password") or "")
+        if not resolved_service:
+            raise ValueError("Enter the wallet service alias for this target-schema connection.")
+        if not resolved_wallet_dir:
+            raise ValueError("Download or select a local wallet before connecting as the target schema.")
+        if not resolved_wallet_password:
+            raise ValueError("Enter the wallet password for this target-schema connection.")
     try:
         import oracledb
     except ImportError as exc:
         raise RuntimeError("The python-oracledb dependency is not installed in .venv yet.") from exc
     return oracledb.connect(
-        user=username, password=password, dsn=details["service_name"],
-        config_dir=details["wallet_dir"], wallet_location=details["wallet_dir"],
-        wallet_password=details["wallet_password"],
+        user=username, password=password, dsn=resolved_service,
+        config_dir=resolved_wallet_dir, wallet_location=resolved_wallet_dir,
+        wallet_password=resolved_wallet_password,
     )
 
 
@@ -642,19 +678,8 @@ def checked_identifier(value: str, label: str) -> str:
 
 
 def sample_catalog() -> list[dict[str, object]]:
-    """Load local sample manifests; code never accepts an arbitrary script path."""
-    samples: list[dict[str, object]] = []
-    for manifest_path in sorted(SAMPLES_ROOT.glob("*/sample.json")):
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"Invalid sample manifest {manifest_path}: {exc}") from exc
-        name = str(manifest.get("name", ""))
-        if not re.fullmatch(r"[a-z0-9-]+", name) or manifest_path.parent.name != name:
-            raise RuntimeError(f"Sample manifest {manifest_path} has an invalid name.")
-        manifest["directory"] = manifest_path.parent
-        samples.append(manifest)
-    return samples
+    """Local sample deployment has been retired in favor of upstream SQLcl installs."""
+    return []
 
 
 def selected_sample(sample_name: str) -> dict[str, object]:
@@ -670,16 +695,34 @@ def sample_parameter_values(sample: dict[str, object], form: dict[str, str], sch
         if not isinstance(parameter, dict):
             raise RuntimeError("Sample manifest has an invalid parameter.")
         name = str(parameter.get("name", ""))
-        value = str(form.get(f"sample_parameter_{name}", "")).strip()
+        value = str(form.get(f"sample_parameter_{name}", "")).strip() or str(parameter.get("default", "")).strip()
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name) or not value:
             raise ValueError(f"Enter {parameter.get('label', name)}.")
+        parameter_type = str(parameter.get("type", "text"))
         if name.endswith("_REGION"):
             if not re.fullmatch(r"[a-z0-9-]+", value):
                 raise ValueError(f"{parameter.get('label', name)} must be an OCI region.")
         elif name.endswith("_OCID"):
             if not re.fullmatch(r"ocid1\.[A-Za-z0-9._-]+", value):
                 raise ValueError(f"{parameter.get('label', name)} must be an OCI OCID.")
+        elif parameter_type == "json":
+            try:
+                json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"{parameter.get('label', name)} must be valid JSON.") from exc
         values[name] = value
+    for parameter in sample.get("derived_parameters", []):
+        if not isinstance(parameter, dict):
+            raise RuntimeError("Sample manifest has an invalid derived parameter.")
+        name = str(parameter.get("name", ""))
+        template = str(parameter.get("template", ""))
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name) or not template:
+            raise RuntimeError("Sample manifest has an invalid derived parameter.")
+        for key, value in values.items():
+            template = template.replace("{{" + key + "}}", value)
+        if "{{" in template:
+            raise RuntimeError(f"Derived parameter {name} has an unresolved placeholder.")
+        values[name] = template
     return values
 
 
@@ -717,6 +760,44 @@ def local_sql_blocks(script: str) -> list[str]:
     return blocks
 
 
+def redacted_sample_sql(statement: str, secret_values: set[str]) -> str:
+    """Return display-safe sample SQL without changing the statement executed."""
+    for secret_value in secret_values:
+        statement = statement.replace(secret_value, "[redacted]")
+    return statement
+
+
+def preview_local_sample_sql(sample: dict[str, object], values: dict[str, str]) -> list[dict[str, object]]:
+    """Render the declared local scripts exactly as deployment will execute them."""
+    directory = sample.get("directory")
+    if not isinstance(directory, Path):
+        raise RuntimeError("Sample directory is unavailable.")
+    secret_values = {
+        values[str(parameter.get("name"))]
+        for parameter in sample.get("parameters", [])
+        if isinstance(parameter, dict) and parameter.get("secret") and str(parameter.get("name")) in values
+    }
+    preview: list[dict[str, object]] = []
+    for step in sample.get("steps", []):
+        if not isinstance(step, dict) or step.get("connection") not in {"admin", "target"}:
+            raise RuntimeError("Sample step must declare an ADMIN or target-schema connection.")
+        script_name = str(step.get("script", ""))
+        script_path = directory / script_name
+        if script_path.parent != directory or not script_path.is_file():
+            raise RuntimeError(f"Sample step {script_name} is missing.")
+        script = script_path.read_text(encoding="utf-8")
+        for key, value in values.items():
+            script = script.replace("{{" + key + "}}", value)
+        if "{{" in script:
+            raise RuntimeError(f"Sample step {script_name} has an unresolved placeholder.")
+        preview.append({
+            "connection": "ADMIN" if step["connection"] == "admin" else values["TARGET_SCHEMA"],
+            "script": script_name,
+            "statements": [redacted_sample_sql(statement, secret_values) for statement in local_sql_blocks(script)],
+        })
+    return preview
+
+
 def run_local_sample(
     state: dict[str, object], sample: dict[str, object], values: dict[str, str], target_schema_password: str
 ) -> None:
@@ -747,9 +828,7 @@ def run_local_sample(
         with connection_factory(state) as connection:
             with connection.cursor() as cursor:
                 for number, statement in enumerate(local_sql_blocks(script), start=1):
-                    debug_statement = statement
-                    for secret_value in secret_values:
-                        debug_statement = debug_statement.replace(secret_value, "[redacted]")
+                    debug_statement = redacted_sample_sql(statement, secret_values)
                     agent_installer_debug(state, f"{sample['name']} / {script_name} ({connection_kind}) block {number}", debug_statement)
                     cursor.execute(statement)
             connection.commit()
@@ -758,12 +837,84 @@ def run_local_sample(
 def enable_oci_resource_principal(state: dict[str, object], username: str = "") -> None:
     """Enable the database-managed OCI principal for ADMIN or one target schema."""
     username = checked_identifier(username, "Target schema") if username else "ADMIN"
-    statement = "BEGIN DBMS_CLOUD_ADMIN.ENABLE_PRINCIPAL_AUTH(provider => 'OCI', username => :username); END;"
+    statement = "BEGIN DBMS_CLOUD_ADMIN.ENABLE_RESOURCE_PRINCIPAL(username => :username); END;"
     with database_connection(state) as admin_connection:
         with admin_connection.cursor() as cursor:
             select_ai_debug(state, "Enable OCI Resource Principal", statement, username=username)
             cursor.execute(statement, username=username)
         admin_connection.commit()
+
+
+def disable_oci_resource_principal(state: dict[str, object], username: str = "") -> None:
+    """Remove OCI$RESOURCE_PRINCIPAL access for ADMIN or one target schema."""
+    username = checked_identifier(username, "Target schema") if username else "ADMIN"
+    statement = "BEGIN DBMS_CLOUD_ADMIN.DISABLE_RESOURCE_PRINCIPAL(username => :username); END;"
+    with database_connection(state) as admin_connection:
+        with admin_connection.cursor() as cursor:
+            select_ai_debug(state, "Disable OCI Resource Principal", statement, username=username)
+            cursor.execute(statement, username=username)
+        admin_connection.commit()
+
+
+def resource_principal_status(state: dict[str, object], username: str) -> bool:
+    """Return whether ADMIN owns, or a named user can access, the RP credential."""
+    username = checked_identifier(username, "Schema")
+    with database_connection(state) as connection:
+        with connection.cursor() as cursor:
+            if username == "ADMIN":
+                cursor.execute(
+                    "SELECT COUNT(*) FROM DBA_CREDENTIALS "
+                    "WHERE OWNER = 'ADMIN' AND CREDENTIAL_NAME = 'OCI$RESOURCE_PRINCIPAL'"
+                )
+            else:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM DBA_TAB_PRIVS "
+                    "WHERE GRANTEE = :grantee AND TABLE_NAME = 'OCI$RESOURCE_PRINCIPAL' "
+                    "AND OWNER = 'ADMIN'",
+                    grantee=username,
+                )
+            return bool(cursor.fetchone()[0])
+
+
+def delete_selected_target_schema(state: dict[str, object], schema_name: str) -> None:
+    """Delete only the selected target schema and all of its database objects.
+
+    DROP USER ... CASCADE removes the schema's objects and revokes grants to
+    that user. Resource Principal access is disabled first.
+    """
+    schema_name = checked_identifier(schema_name, "Target schema")
+    if schema_name == "ADMIN":
+        raise ValueError("ADMIN cannot be deleted from this console.")
+    selected = str(state.get("sample_settings", {}).get("target_schema") or load_last_settings().get("target_schema") or "").upper()
+    if not selected:
+        raise ValueError("Select the target schema in Target schema before deleting it.")
+    if schema_name != selected:
+        raise ValueError(f"For safety, this page can delete only the selected target schema {selected}.")
+    with database_connection(state) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM DBA_USERS WHERE USERNAME = :username", username=schema_name)
+            if not cursor.fetchone()[0]:
+                raise ValueError(f"Target schema {schema_name} does not exist.")
+            try:
+                cursor.execute("BEGIN DBMS_CLOUD_ADMIN.DISABLE_RESOURCE_PRINCIPAL(username => :username); END;", username=schema_name)
+            except Exception:
+                pass
+            cursor.execute(f"DROP USER {schema_name} CASCADE")
+        connection.commit()
+    persisted = load_last_settings()
+    persisted.pop("target_schema", None)
+    persisted.pop("known_teams", None)
+    for key in SELECT_AI_SETTING_KEYS:
+        persisted.pop(key, None)
+    save_last_settings(persisted)
+    state["sample_settings"] = {}
+    state["select_ai_settings"] = {}
+    for key in list(state):
+        if key.startswith("target_schema_password:"):
+            state.pop(key, None)
+    for key in ("sample_tables", "sample_data_ready", "target_select_ai_ready", "target_select_ai_profiles", "target_select_ai_credentials", "target_select_ai_privileges", "target_select_ai_checklist", "agent_readiness_ok", "sample_agent_installed", "agents", "installed_teams", "installed_team_schema", "selected_team", "selected_card", "chat_history", "pending_a2a_task_id", "last_a2a_task_id", "last_a2a_task_state", "last_a2a_task_diagnostic", "last_a2a_request", "a2a_context_id", "access_token", "oauth_token_details", "oauth_token_source", "last_discovery", "oauth_metadata", "oauth_authorization_code", "oauth_callback_received", "resource_principal_checked", "agent_install_debug", "select_ai_debug", "demo_verification", "demo_verified"):
+        state.pop(key, None)
+    state.pop("section_feedback", None)
 
 
 def run_select_ai_setup(
@@ -815,7 +966,6 @@ def run_select_ai_setup(
             elif selected_provider == "oci_resource_principal":
                 if not form.get("oci_compartment_id"):
                     raise ValueError("Enter the OCI Generative AI compartment OCID.")
-                enable_oci_resource_principal(state, resource_principal_username)
                 attributes["oci_compartment_id"] = form["oci_compartment_id"]
                 if form.get("oci_region"):
                     attributes["region"] = form["oci_region"]
@@ -923,7 +1073,7 @@ def grant_target_select_ai_privileges(state: dict[str, object], schema_name: str
         return
     with database_connection(state) as connection:
         with connection.cursor() as cursor:
-            for package_name in ("DBMS_CLOUD", "DBMS_CLOUD_AI", "DBMS_CLOUD_AI_AGENT"):
+            for package_name in ("DBMS_CLOUD", "DBMS_CLOUD_AI", "DBMS_CLOUD_AI_AGENT", "DBMS_CLOUD_PIPELINE"):
                 cursor.execute(f"GRANT EXECUTE ON {package_name} TO {schema_name}")
         connection.commit()
 
@@ -931,13 +1081,13 @@ def grant_target_select_ai_privileges(state: dict[str, object], schema_name: str
 def target_select_ai_privilege_status(state: dict[str, object], schema_name: str) -> list[str]:
     """Return the explicit package grants held by the target schema."""
     schema_name = checked_identifier(schema_name, "Target schema")
-    required = ("DBMS_CLOUD", "DBMS_CLOUD_AI", "DBMS_CLOUD_AI_AGENT")
+    required = ("DBMS_CLOUD", "DBMS_CLOUD_AI", "DBMS_CLOUD_AI_AGENT", "DBMS_CLOUD_PIPELINE")
     with database_connection(state) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT TABLE_NAME FROM DBA_TAB_PRIVS "
                 "WHERE GRANTEE = :schema AND PRIVILEGE = 'EXECUTE' "
-                "AND (TABLE_NAME IN ('DBMS_CLOUD', 'DBMS_CLOUD_AI', 'DBMS_CLOUD_AI_AGENT') "
+                "AND (TABLE_NAME IN ('DBMS_CLOUD', 'DBMS_CLOUD_AI', 'DBMS_CLOUD_AI_AGENT', 'DBMS_CLOUD_PIPELINE') "
                 "OR TABLE_NAME LIKE 'DBMS_CLOUD$PDBCS%')",
                 schema=schema_name,
             )
@@ -959,6 +1109,92 @@ def list_target_select_ai_resources(state: dict[str, object], schema_name: str, 
     state["target_select_ai_profiles"] = profiles
     state["target_select_ai_credentials"] = credentials
     return profiles, credentials
+
+
+def list_target_agent_config(
+    state: dict[str, object], schema_name: str, password: str, service_name: str = "", wallet_password: str = ""
+) -> list[dict[str, str]]:
+    """Read a manually installed sample's optional SELECTAI_AGENT_CONFIG table."""
+    schema_name = checked_identifier(schema_name, "Target schema")
+    with target_schema_connection(state, schema_name, password, service_name, wallet_password) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT "KEY", "VALUE", "AGENT" FROM SELECTAI_AGENT_CONFIG ORDER BY "AGENT", "KEY"')
+            rows = []
+            for key, value, agent in cursor:
+                raw_value = value.read() if hasattr(value, "read") else value
+                rows.append({"key": str(key), "value": str(raw_value or ""), "agent": str(agent)})
+    state["target_agent_config"] = rows
+    return rows
+
+
+def update_target_agent_config(
+    state: dict[str, object], schema_name: str, password: str, agent_name: str, config_key: str, config_value: str,
+    service_name: str = "", wallet_password: str = ""
+) -> None:
+    """Upsert one target-owned SELECTAI_AGENT_CONFIG setting."""
+    schema_name = checked_identifier(schema_name, "Target schema")
+    agent_name = checked_identifier(agent_name, "Agent name")
+    config_key = checked_identifier(config_key, "Configuration key")
+    if not config_value.strip():
+        raise ValueError("Enter a configuration value.")
+    with target_schema_connection(state, schema_name, password, service_name, wallet_password) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                '''MERGE INTO SELECTAI_AGENT_CONFIG target
+                   USING (SELECT :config_key config_key, :config_value config_value, :agent agent FROM DUAL) source
+                   ON (target."KEY" = source.config_key AND target."AGENT" = source.agent)
+                   WHEN MATCHED THEN UPDATE SET target."VALUE" = source.config_value
+                   WHEN NOT MATCHED THEN INSERT ("KEY", "VALUE", "AGENT")
+                        VALUES (source.config_key, source.config_value, source.agent)''',
+                config_key=config_key, config_value=config_value.strip(), agent=agent_name,
+            )
+        connection.commit()
+
+
+def delete_target_agent_config(
+    state: dict[str, object], schema_name: str, password: str, agent_name: str, config_key: str,
+    service_name: str = "", wallet_password: str = ""
+) -> None:
+    """Delete one configuration key from the selected target schema."""
+    schema_name = checked_identifier(schema_name, "Target schema")
+    agent_name = checked_identifier(agent_name, "Agent name")
+    config_key = checked_identifier(config_key, "Configuration key")
+    with target_schema_connection(state, schema_name, password, service_name, wallet_password) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute('DELETE FROM SELECTAI_AGENT_CONFIG WHERE "AGENT" = :agent AND "KEY" = :config_key', agent=agent_name, config_key=config_key)
+            if cursor.rowcount == 0:
+                raise ValueError(f"No configuration row exists for {agent_name}.{config_key}.")
+        connection.commit()
+
+
+def list_target_schema_teams(
+    state: dict[str, object], schema_name: str, password: str, service_name: str = "", wallet_password: str = ""
+) -> list[dict[str, object]]:
+    """List teams visible to their owning schema without using external OAuth.
+
+    ``LIST_TEAMS`` is deliberately executed on a real target-schema connection.
+    A2A discovery is external-client/OAuth scoped, whereas this check proves
+    what SQLcl installed for the database user that will run the team.
+    """
+    schema_name = checked_identifier(schema_name, "Target schema")
+    with target_schema_connection(state, schema_name, password, service_name, wallet_password) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT DBMS_CLOUD_AI_AGENT.LIST_TEAMS() FROM DUAL")
+            row = cursor.fetchone()
+            # python-oracledb LOB locators are valid only while their database
+            # connection remains open. Read the JSON before leaving this scope.
+            raw_value = row[0] if row else "[]"
+            payload_text = raw_value.read() if hasattr(raw_value, "read") else str(raw_value or "[]")
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("LIST_TEAMS returned invalid JSON.") from exc
+    if not isinstance(payload, list):
+        raise RuntimeError("LIST_TEAMS returned an unexpected result.")
+    teams = [item if isinstance(item, dict) else {"name": str(item)} for item in payload]
+    state["installed_teams"] = teams
+    state["installed_team_schema"] = schema_name
+    return teams
 
 
 def drop_target_select_ai_profile(state: dict[str, object], schema_name: str, password: str, profile_name: str) -> None:
@@ -994,11 +1230,16 @@ def test_target_select_ai_profile(state: dict[str, object], schema_name: str, pa
                 prompt="Reply exactly: Target schema Select AI is ready.", profile=profile_name,
             )
             row = cursor.fetchone()
+            # GENERATE returns a CLOB. Its locator must be read before the
+            # cursor and connection close, otherwise python-oracledb raises
+            # DPY-1001 even though CREATE_PROFILE already succeeded.
+            raw_result = row[0] if row and row[0] is not None else None
+            result = raw_result.read() if hasattr(raw_result, "read") else str(raw_result or "No text returned")
         finally:
             cursor.close()
     finally:
         connection.close()
-    return str(row[0]) if row and row[0] is not None else "No text returned"
+    return result
 
 
 def delete_select_ai_profile(state: dict[str, object], profile_name: str) -> None:
@@ -1123,27 +1364,28 @@ def send_a2a_message(state: dict[str, object], prompt: str) -> object:
         "role": "user",
         "parts": [{"kind": "text", "text": prompt.strip()}],
     }
-    # A2A v0.3: use contextId for conversational continuity. For a task that
-    # explicitly requests human input, include both IDs to resume that task.
+    # A2A v0.3: use contextId for conversational continuity. A pending task
+    # must be resumed with tasks/send rather than treated as a new message.
     if context_id := str(state.get("a2a_context_id", "")):
         message["contextId"] = context_id
-    if pending_task_id:
-        message["taskId"] = pending_task_id
-    # A2A v0.3 places continuation IDs on Message. Oracle's JSON-RPC examples
-    # also accept them at params level, so preserve them in both locations.
     params: dict[str, object] = {"message": message}
     if context_id := str(state.get("a2a_context_id", "")):
         params["contextId"] = context_id
     if pending_task_id:
         params["taskId"] = pending_task_id
-    payload = {"jsonrpc": "2.0", "id": str(uuid.uuid4()), "method": "message/send", "params": params}
+    method = "tasks/send" if pending_task_id else "message/send"
+    payload = {"jsonrpc": "2.0", "id": str(uuid.uuid4()), "method": method, "params": params}
+    if SELECT_AI_DEBUG:
+        # Token is deliberately excluded. The payload helps verify that a YES
+        # is a task continuation, not a new message, without server-log access.
+        state["last_a2a_request"] = {"endpoint": endpoint, "payload": payload}
     response = requests.post(endpoint, headers=oracle_headers(str(token)), json=payload, timeout=60)
     if not response.ok:
         raise RuntimeError(response_error(response))
     reply = response.json()
     remember_a2a_context(state, reply)
     task_id = a2a_task_id(reply)
-    state.setdefault("chat_history", []).append({"role": "user", "text": prompt.strip()})
+    state.setdefault("chat_history", []).append({"role": "user", "text": prompt.strip(), "timestamp": time.strftime("%H:%M:%S")})
     if task_id:
         state["pending_a2a_task_id"] = task_id
         state["last_a2a_task_id"] = task_id
@@ -1151,10 +1393,10 @@ def send_a2a_message(state: dict[str, object], prompt: str) -> object:
         reply = wait_for_a2a_task(state, wait_seconds=15)
         if state.get("pending_a2a_task_id"):
             rendered_reply = f"Task submitted and is still running after 15 seconds. Check task status to retrieve the completed response.\n\nTask ID: {task_id}"
-            state["chat_history"].append({"role": "assistant", "text": rendered_reply})
+            state["chat_history"].append({"role": "assistant", "text": rendered_reply, "timestamp": time.strftime("%H:%M:%S")})
     else:
         rendered_reply = a2a_text(reply) or json.dumps(reply, indent=2)
-        state["chat_history"].append({"role": "assistant", "text": rendered_reply})
+        state["chat_history"].append({"role": "assistant", "text": rendered_reply, "timestamp": time.strftime("%H:%M:%S")})
     state["chat_history"] = state["chat_history"][-12:]
     return reply
 
@@ -1193,6 +1435,29 @@ def a2a_task_state(reply: object) -> str:
     return ""
 
 
+def a2a_diagnostic_summary(value: object) -> dict[str, object]:
+    """Expose task state and errors without rendering the complete payload."""
+    summary: dict[str, object] = {}
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for key, child in node.items():
+                normalized = str(key).lower()
+                if normalized in {"id", "taskid", "contextid", "state", "code", "error", "errormessage"}:
+                    if isinstance(child, (str, int, float, bool)) and child not in ("", None):
+                        name = {"taskid": "task_id", "contextid": "context_id", "errormessage": "error_message"}.get(normalized, normalized)
+                        summary[name] = str(child)[:2000]
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(value)
+    if not summary:
+        summary["detail"] = "No scalar task diagnostic fields were returned. Enable --debug for the complete redacted response."
+    return summary
+
+
 def normalized_a2a_task_state(value: object) -> str:
     """Normalize equivalent A2A state spellings across server versions."""
     return str(value or "").strip().lower().replace("_", "-")
@@ -1221,7 +1486,7 @@ def poll_a2a_task(state: dict[str, object], add_to_history: bool = True) -> obje
     state["last_a2a_task_diagnostic"] = reply
     rendered_reply = a2a_text(reply) or json.dumps(reply, indent=2)
     if add_to_history:
-        state.setdefault("chat_history", []).append({"role": "assistant", "text": f"Task {task_id} status: {state_value or 'received'}\n\n{rendered_reply}"})
+        state.setdefault("chat_history", []).append({"role": "assistant", "text": f"Task {task_id} status: {state_value or 'received'}\n\n{rendered_reply}", "timestamp": time.strftime("%H:%M:%S")})
         state["chat_history"] = state["chat_history"][-12:]
     if normalized_a2a_task_state(state_value) in {"completed", "failed", "canceled", "cancelled", "rejected"}:
         state.pop("pending_a2a_task_id", None)
@@ -1237,13 +1502,13 @@ def wait_for_a2a_task(state: dict[str, object], wait_seconds: int = 15) -> objec
         if state_value in {"input-required", "auth-required"}:
             task_id = str(state.get("last_a2a_task_id", ""))
             rendered_reply = a2a_text(reply) or json.dumps(reply, indent=2)
-            state.setdefault("chat_history", []).append({"role": "assistant", "text": f"Task {task_id} requires input. Reply in this chat to continue.\n\n{rendered_reply}"})
+            state.setdefault("chat_history", []).append({"role": "assistant", "text": f"Task {task_id} requires input. Reply in this chat to continue.\n\n{rendered_reply}", "timestamp": time.strftime("%H:%M:%S")})
             return reply
         if not state.get("pending_a2a_task_id"):
             task_id = str(state.get("last_a2a_task_id", ""))
             state_value = a2a_task_state(reply) or "received"
             rendered_reply = a2a_text(reply) or json.dumps(reply, indent=2)
-            state.setdefault("chat_history", []).append({"role": "assistant", "text": f"Task {task_id} status: {state_value}\n\n{rendered_reply}"})
+            state.setdefault("chat_history", []).append({"role": "assistant", "text": f"Task {task_id} status: {state_value}\n\n{rendered_reply}", "timestamp": time.strftime("%H:%M:%S")})
             return reply
         if attempt < wait_seconds - 1:
             time.sleep(1)
@@ -1334,20 +1599,43 @@ def create_target_schema(state: dict[str, object], schema_name: str, password: s
         connection.commit()
 
 
-def run_oracle_sample_installer(state: dict[str, object], schema_name: str, profile_name: str, script_name: str, source_url: str | None = None, expected_sha256: str | None = None) -> None:
-    """Execute Oracle's current sample SQL*Plus script with safe, validated inputs."""
-    schema_name = checked_identifier(schema_name, "Target schema")
-    profile_name = checked_identifier(profile_name, "Select AI profile")
-    if script_name not in {"oracle_ai_database_agent_tool.sql", "oracle_ai_database_agent.sql"}:
-        raise ValueError("Unknown Oracle sample installer.")
-    response = requests.get(source_url or f"{ORACLE_SAMPLE_BASE_URL}/{script_name}", timeout=30)
+def sql_literal(value: str) -> str:
+    """Return a SQL string literal for a manifest-provided upstream bind value."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def upstream_sample_sql_blocks(
+    values: dict[str, str], script_name: str, source_url: str, expected_sha256: str, variable_map: dict[str, str]
+) -> tuple[list[str], str]:
+    """Download, pin-check, and normalize one declared upstream SQLcl installer.
+
+    Oracle samples usually initialise a SQLcl bind using an expression like
+    ``EXEC :v_schema := '&SCHEMA_NAME'``.  The manifest maps that prompt name
+    to a validated value.  No arbitrary script URL, variable, or SQL is taken
+    from the browser request.
+    """
+    if not script_name or not source_url or not expected_sha256:
+        raise RuntimeError("Upstream sample script metadata is incomplete.")
+    if not variable_map or any(
+        not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) or value not in values
+        for key, value in variable_map.items()
+    ):
+        raise RuntimeError(f"{script_name} has an invalid upstream variable mapping.")
+    response = requests.get(source_url, timeout=30)
     if not response.ok:
         raise RuntimeError(f"Could not download Oracle's sample installer: {response_error(response)}")
     script_fingerprint = hashlib.sha256(response.content).hexdigest()
-    if expected_sha256 and script_fingerprint.lower() != expected_sha256.lower():
+    if script_fingerprint.lower() != expected_sha256.lower():
         raise RuntimeError(
             f"{script_name} did not match the sample manifest SHA-256. Expected {expected_sha256}, got {script_fingerprint}."
         )
+    bind_values: dict[str, str] = {}
+    assignment_pattern = re.compile(r"^\s*EXEC\s+:(\w+)\s*:=\s*'&([A-Z][A-Z0-9_]*)'\s*;?\s*$", re.IGNORECASE)
+    for line in response.text.splitlines():
+        match = assignment_pattern.match(line)
+        if match and match.group(2).upper() in variable_map:
+            bind_values[match.group(1).lower()] = values[variable_map[match.group(2).upper()]]
+
     blocks: list[str] = []
     current: list[str] = []
     for line in response.text.splitlines():
@@ -1355,12 +1643,53 @@ def run_oracle_sample_installer(state: dict[str, object], schema_name: str, prof
         if stripped == "/":
             if current:
                 blocks.append("\n".join(current)); current = []
-        elif not stripped or stripped.upper() in {"REM", "PROMPT", "SET", "VAR"} or stripped.upper().startswith(("REM ", "PROMPT ", "SET ", "VAR ", "EXEC :V_")):
+        elif not stripped or stripped.upper() in {"REM", "PROMPT", "SET", "VAR", "DEFINE"} or stripped.upper().startswith(("REM ", "PROMPT ", "SET ", "VAR ", "DEFINE ", "EXEC ")):
             continue
         else:
-            current.append(line.replace(":v_schema", f"'{schema_name}'").replace(":v_ai_profile_name", f"'{profile_name}'"))
+            for bind_name, value in bind_values.items():
+                line = re.sub(r":" + re.escape(bind_name) + r"\b", sql_literal(value), line, flags=re.IGNORECASE)
+            if "&" in line:
+                raise RuntimeError(f"{script_name} contains an unresolved SQLcl substitution variable.")
+            current.append(line)
     if current:
         blocks.append("\n".join(current))
+    return blocks, script_fingerprint
+
+
+def preview_sample_sql(sample: dict[str, object], values: dict[str, str]) -> list[dict[str, object]]:
+    """Build a display-only deployment plan; it opens no database connection."""
+    if upstream := sample.get("upstream"):
+        if not isinstance(upstream, dict):
+            raise RuntimeError("Sample manifest has an invalid upstream declaration.")
+        preview: list[dict[str, object]] = []
+        for item in upstream.get("scripts", []):
+            if not isinstance(item, dict):
+                raise RuntimeError("Sample manifest has an invalid upstream script declaration.")
+            name = str(item["name"])
+            variable_map = item.get("variables", {"SCHEMA_NAME": "TARGET_SCHEMA", "AI_PROFILE_NAME": "PROFILE_NAME"})
+            if not isinstance(variable_map, dict):
+                raise RuntimeError("Sample manifest has an invalid upstream variable mapping.")
+            blocks, fingerprint = upstream_sample_sql_blocks(
+                values, name, str(item["url"]), str(item["sha256"]),
+                {str(key): str(value) for key, value in variable_map.items()},
+            )
+            preview.append({"connection": str(item.get("connection", "ADMIN")).upper(), "script": f"{name} (SHA-256 {fingerprint})", "statements": blocks})
+        return preview
+    return preview_local_sample_sql(sample, values)
+
+
+def run_upstream_sample_installer(state: dict[str, object], values: dict[str, str], item: dict[str, object]) -> None:
+    """Execute one manifest-declared, checksum-pinned upstream SQLcl installer."""
+    script_name = str(item.get("name", ""))
+    variable_map = item.get("variables", {"SCHEMA_NAME": "TARGET_SCHEMA", "AI_PROFILE_NAME": "PROFILE_NAME"})
+    if not isinstance(variable_map, dict):
+        raise RuntimeError("Sample manifest has an invalid upstream variable mapping.")
+    if str(item.get("connection", "admin")).lower() != "admin":
+        raise RuntimeError("Upstream sample installers currently must run as ADMIN.")
+    blocks, script_fingerprint = upstream_sample_sql_blocks(
+        values, script_name, str(item.get("url", "")), str(item.get("sha256", "")),
+        {str(key): str(value) for key, value in variable_map.items()},
+    )
     agent_installer_debug(
         state,
         f"Downloaded {script_name}; SHA-256 {script_fingerprint}; parsed {len(blocks)} executable block(s).",
@@ -1395,15 +1724,18 @@ def deploy_sample(state: dict[str, object], sample_name: str, schema_name: str, 
         sample_schema_readiness(state, schema_name)
         if not state.get("sample_data_ready"):
             raise ValueError(f"{sample['title']} requires the controlled sales data in {schema_name}.")
+    # Select AI Agent execution also depends on DBMS_CLOUD_PIPELINE. Keep this
+    # idempotent grant in the package deployment path so SQLcl and UI installs
+    # have the same target-schema prerequisites.
+    grant_target_select_ai_privileges(state, schema_name)
     if upstream := sample.get("upstream"):
         if not isinstance(upstream, dict):
             raise RuntimeError("Sample manifest has an invalid upstream declaration.")
+        values = sample_parameter_values(sample, form, schema_name, profile_name)
         for item in upstream.get("scripts", []):
             if not isinstance(item, dict):
                 raise RuntimeError("Sample manifest has an invalid upstream script declaration.")
-            run_oracle_sample_installer(
-                state, schema_name, profile_name, str(item["name"]), str(item["url"]), str(item["sha256"])
-            )
+            run_upstream_sample_installer(state, values, item)
             if item["name"] == "oracle_ai_database_agent_tool.sql":
                 ensure_oracle_sample_tools_valid(state, schema_name)
     else:
@@ -1411,6 +1743,8 @@ def deploy_sample(state: dict[str, object], sample_name: str, schema_name: str, 
             state, sample, sample_parameter_values(sample, form, schema_name, profile_name),
             form.get("target_schema_password", ""),
         )
+        if package_name := sample.get("validate_package"):
+            ensure_sample_package_valid(state, schema_name, str(package_name))
     return str(sample["team_name"])
 
 
@@ -1446,6 +1780,32 @@ def ensure_oracle_sample_tools_valid(state: dict[str, object], schema_name: str)
             "Oracle stored an invalid ORACLE_AI_DATA_RETRIEVAL_FUNCTIONS package; the team was not installed. "
             f"{detail}. Run Oracle's approved SQLcl tool script directly, or review the installer debug SHA-256."
         )
+
+
+def ensure_sample_package_valid(state: dict[str, object], schema_name: str, package_name: str) -> None:
+    """Reject a local sample deployment if its named package compiled invalid."""
+    schema_name = checked_identifier(schema_name, "Target schema")
+    package_name = checked_identifier(package_name, "Sample package")
+    with database_connection(state) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT OBJECT_TYPE, STATUS FROM DBA_OBJECTS "
+                "WHERE OWNER = :owner AND OBJECT_NAME = :name "
+                "AND OBJECT_TYPE IN ('PACKAGE', 'PACKAGE BODY')",
+                owner=schema_name, name=package_name,
+            )
+            statuses = {str(object_type): str(status) for object_type, status in cursor}
+            cursor.execute(
+                "SELECT LINE, POSITION, TEXT FROM DBA_ERRORS "
+                "WHERE OWNER = :owner AND NAME = :name ORDER BY SEQUENCE",
+                owner=schema_name, name=package_name,
+            )
+            errors = [f"line {line}, column {position}: {str(text).strip()}" for line, position, text in cursor]
+    invalid = [kind for kind in ("PACKAGE", "PACKAGE BODY") if statuses.get(kind) != "VALID"]
+    if invalid or errors:
+        detail = "; ".join(errors[:3]) or f"invalid or missing: {', '.join(invalid)}"
+        agent_installer_debug(state, f"Local sample package {package_name} validation failed", detail)
+        raise RuntimeError(f"Local sample package {package_name} is invalid; the team was not installed. {detail}")
 
 
 def response_error(response: requests.Response) -> str:
@@ -1777,7 +2137,7 @@ def test_chat_page():
     return render_workspace("test_chat.html", "test-chat")
 
 
-@app.get("/select-ai")
+@app.get("/select-ai-legacy")
 def select_ai_page():
     return render_workspace("select_ai.html", "select-ai")
 
@@ -1787,14 +2147,38 @@ def connect_page():
     return render_workspace("connect.html", f"setup-connect-{request.args.get('view', 'status')}")
 
 
-@app.get("/sample-data")
+@app.get("/select-ai")
 def sample_data_page():
-    return render_workspace("sample_data.html", f"setup-user-{request.args.get('view', 'schema')}")
+    view = request.args.get("view", "schema")
+    if view in {"data", "privileges", "cleanup"}:
+        return redirect(url_for("sample_data_page", view="schema"))
+    return render_workspace("sample_data.html", f"setup-user-{view}")
+
+
+@app.get("/sample-data")
+def legacy_sample_data_page():
+    """Keep old bookmarks working while the UI uses the Select AI route."""
+    return redirect(url_for("sample_data_page", view=request.args.get("view", "schema")))
+
+
+@app.get("/resource-principal")
+def resource_principal_page():
+    return render_workspace("resource_principal.html", "setup-resource-principal")
+
+
+@app.get("/agent-config")
+def agent_config_page():
+    return render_workspace("agent_config.html", "setup-agent-config")
+
+
+@app.get("/schema-cleanup")
+def schema_cleanup_page():
+    return render_workspace("schema_cleanup.html", "setup-user-delete")
 
 
 @app.get("/oauth-clients")
 def oauth_clients_page():
-    return render_workspace("oauth_clients.html", f"setup-oauth-{request.args.get('view', 'register')}")
+    return render_workspace("oauth_clients.html", "setup-oauth-register")
 
 
 @app.get("/oauth-token")
@@ -1938,21 +2322,71 @@ def oauth_callback_route():
     return redirect(url_for("oauth_token_page", _anchor="token"))
 
 
-@app.post("/sample-data/select")
-def sample_data_select_route():
+def resource_principal_form_user(state: dict[str, object]) -> str:
+    """Return the one selected target schema eligible for this UI action."""
+    schema = checked_identifier(str(state.get("sample_settings", {}).get("target_schema") or ""), "Target schema")
+    selected = str(state.get("sample_settings", {}).get("target_schema") or load_last_settings().get("target_schema") or "").upper()
+    if selected and schema != selected:
+        raise ValueError(f"Use the selected target schema {selected}, or select a different schema first.")
+    return schema
+
+
+@app.post("/resource-principal/check")
+def resource_principal_check_route():
+    state = volatile_state()
+    try:
+        username = resource_principal_form_user(state)
+        enabled = resource_principal_status(state, username)
+        state["resource_principal_checked"] = {"username": username, "enabled": enabled}
+        set_section_feedback(state, "resource-principal", f"OCI Resource Principal is {'enabled' if enabled else 'not enabled'} for {username}.", "success" if enabled else "error")
+    except Exception as exc:
+        set_section_feedback(state, "resource-principal", f"Resource Principal check failed: {str(exc)[:1_500]}", "error")
+    return redirect(url_for("resource_principal_page"))
+
+
+@app.post("/resource-principal/enable")
+def resource_principal_enable_route():
+    state = volatile_state()
+    try:
+        username = resource_principal_form_user(state)
+        enable_oci_resource_principal(state, username)
+        state["resource_principal_checked"] = {"username": username, "enabled": resource_principal_status(state, username)}
+        set_section_feedback(state, "resource-principal", f"Enabled OCI Resource Principal for {username}.", "success")
+    except Exception as exc:
+        set_section_feedback(state, "resource-principal", f"Resource Principal enable failed: {str(exc)[:1_500]}", "error")
+    return redirect(url_for("resource_principal_page"))
+
+
+@app.post("/resource-principal/disable")
+def resource_principal_disable_route():
+    state = volatile_state()
+    try:
+        if request.form.get("confirmation", "").strip() != "DISABLE RESOURCE PRINCIPAL":
+            raise ValueError("Type DISABLE RESOURCE PRINCIPAL to remove OCI Resource Principal access.")
+        username = resource_principal_form_user(state)
+        disable_oci_resource_principal(state, username)
+        state["resource_principal_checked"] = {"username": username, "enabled": resource_principal_status(state, username)}
+        set_section_feedback(state, "resource-principal", f"Disabled OCI Resource Principal for {username}.", "success")
+    except Exception as exc:
+        set_section_feedback(state, "resource-principal", f"Resource Principal disable failed: {str(exc)[:1_500]}", "error")
+    return redirect(url_for("resource_principal_page"))
+
+
+@app.post("/schema-cleanup/delete")
+def schema_cleanup_delete_route():
     state = volatile_state()
     try:
         schema = checked_identifier(request.form.get("target_schema", ""), "Target schema")
-        settings = load_last_settings(); settings["target_schema"] = schema; save_last_settings(settings)
-        state["sample_settings"] = {"target_schema": schema}
-        tables = sample_schema_readiness(state, schema)
-        set_section_feedback(state, "sample-data", f"Selected {schema}; found {len(tables)} controlled demo table(s).", "success")
+        if request.form.get("confirmation", "").strip().upper() != "DELETE SCHEMA":
+            raise ValueError("Type DELETE SCHEMA to permanently remove the selected target schema.")
+        delete_selected_target_schema(state, schema)
+        set_section_feedback(state, "schema-cleanup", f"Deleted target schema {schema}, its owned objects, direct grants, and schema-level Resource Principal access.", "success")
     except Exception as exc:
-        set_section_feedback(state, "sample-data", f"Schema selection failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("sample_data_page", view="schema"))
+        set_section_feedback(state, "schema-cleanup", f"Target schema deletion failed: {str(exc)[:1_500]}", "error")
+    return redirect(url_for("schema_cleanup_page"))
 
 
-@app.post("/sample-data/schema/create")
+@app.post("/select-ai/schema/create")
 def sample_schema_create_route():
     state = volatile_state()
     try:
@@ -1961,15 +2395,20 @@ def sample_schema_create_route():
         schema = request.form.get("target_schema", "")
         create_target_schema(state, schema, request.form.get("schema_password", ""))
         schema = checked_identifier(schema, "Target schema")
-        settings = load_last_settings(); settings["target_schema"] = schema; save_last_settings(settings)
-        state["sample_settings"] = {"target_schema": schema}
-        set_section_feedback(state, "sample-data", f"Created target schema {schema}. Create the controlled sample data next.", "success")
+        grant_target_select_ai_privileges(state, schema)
+        granted = target_select_ai_privilege_status(state, schema)
+        state["target_select_ai_privileges"] = granted
+        required = {"DBMS_CLOUD", "DBMS_CLOUD_AI", "DBMS_CLOUD_AI_AGENT"}
+        missing = sorted(required - set(granted))
+        if missing:
+            raise RuntimeError("Schema was created, but the required DBMS_CLOUD package grants could not be verified: " + ", ".join(missing))
+        set_section_feedback(state, "target-schema", f"Created target schema {schema} and verified DBMS_CLOUD, DBMS_CLOUD_AI, and DBMS_CLOUD_AI_AGENT grants. Connect as {schema} in Database Connections to select it for setup.", "success")
     except Exception as exc:
-        set_section_feedback(state, "sample-data", f"Schema creation failed: {str(exc)[:1_500]}", "error")
+        set_section_feedback(state, "target-schema", f"Schema creation failed: {str(exc)[:1_500]}", "error")
     return redirect(url_for("sample_data_page", view="schema"))
 
 
-@app.post("/sample-data/privileges")
+@app.post("/select-ai/privileges")
 def target_select_ai_privileges_route():
     """Make the required target-user grants visible and safe to repeat."""
     state = volatile_state()
@@ -1989,10 +2428,10 @@ def target_select_ai_privileges_route():
         set_section_feedback(state, "sample-data", f"ADMIN verified idempotent EXECUTE grants for {schema}: " + ", ".join(granted) + ".", "success")
     except Exception as exc:
         set_section_feedback(state, "sample-data", f"Target-schema privilege grant failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("sample_data_page", view="privileges"))
+    return redirect(url_for("sample_data_page", view="schema"))
 
 
-@app.post("/sample-data/create")
+@app.post("/select-ai/create")
 def sample_data_create_route():
     state = volatile_state()
     try:
@@ -2008,7 +2447,7 @@ def sample_data_create_route():
     return redirect(url_for("sample_data_page", view="data"))
 
 
-@app.post("/sample-data/select-ai")
+@app.post("/select-ai/profile")
 def target_select_ai_setup_route():
     """Create and test the profile in the schema that owns the sample agent."""
     state = volatile_state()
@@ -2025,7 +2464,13 @@ def target_select_ai_setup_route():
         checklist: dict[str, str] = {}
         grant_target_select_ai_privileges(state, schema)
         state["target_select_ai_privileges"] = target_select_ai_privilege_status(state, schema)
-        checklist["database privileges"] = "ADMIN granted EXECUTE on DBMS_CLOUD, DBMS_CLOUD_AI, and DBMS_CLOUD_AI_AGENT"
+        checklist["database privileges"] = "ADMIN granted EXECUTE on DBMS_CLOUD, DBMS_CLOUD_AI, DBMS_CLOUD_AI_AGENT, and DBMS_CLOUD_PIPELINE"
+        if form.get("provider") == "oci_resource_principal":
+            # Enabling access can invalidate or reset a schema session. Do it
+            # through ADMIN before opening the target-schema connection used
+            # for CREATE_PROFILE and SET_PROFILE.
+            enable_oci_resource_principal(state, schema)
+            checklist["provider credential"] = "Database-managed OCI$RESOURCE_PRINCIPAL enabled; no API-key credential was created"
         connection = target_schema_connection(state, schema, target_password)
         run_select_ai_setup(state, form, connection=connection, checklist=checklist, resource_principal_username=schema)
         # Use a separately opened session for the stateless call; setup closes
@@ -2037,15 +2482,15 @@ def target_select_ai_setup_route():
         credential_name = "OCI$RESOURCE_PRINCIPAL" if form.get("provider") == "oci_resource_principal" else form.get("credential_name", "")
         saved = load_last_settings(); saved.update({"target_schema": schema, "profile_name": profile, "credential_name": credential_name}); save_last_settings(saved)
         state["select_ai_settings"] = {**state.get("select_ai_settings", {}), **{key: form[key] for key in SELECT_AI_SETTING_KEYS if key in form}}
-        set_section_feedback(state, "sample-data", f"Target-schema Select AI is ready in {schema}: profile {profile}; live test: {result[:200]}", "success")
+        set_section_feedback(state, "target-select-ai", f"Target-schema Select AI is ready in {schema}: profile {profile}; live test: {result[:200]}", "success")
     except Exception as exc:
         state["target_select_ai_ready"] = False
         select_ai_debug(state, "Target-schema Select AI setup error", error=str(exc)[:1_500])
-        set_section_feedback(state, "sample-data", f"Target-schema Select AI setup failed: {str(exc)[:1_500]}", "error")
+        set_section_feedback(state, "target-select-ai", f"Target-schema Select AI setup failed: {str(exc)[:1_500]}", "error")
     return redirect(url_for("sample_data_page", view="select-ai"))
 
 
-@app.post("/sample-data/select-ai/test")
+@app.post("/select-ai/profile/test")
 def target_select_ai_test_route():
     state = volatile_state()
     try:
@@ -2061,7 +2506,7 @@ def target_select_ai_test_route():
     return redirect(url_for("sample_data_page", view="select-ai"))
 
 
-@app.post("/sample-data/select-ai/resources")
+@app.post("/select-ai/resources")
 def target_select_ai_resources_route():
     state = volatile_state()
     try:
@@ -2075,7 +2520,65 @@ def target_select_ai_resources_route():
     return redirect(url_for("sample_data_page", view="select-ai"))
 
 
-@app.post("/sample-data/select-ai/profile/delete")
+@app.post("/select-ai/agent-config")
+def target_agent_config_route():
+    state = volatile_state()
+    try:
+        schema = checked_identifier(request.form.get("target_schema", ""), "Target schema")
+        password = request_secret(state, "target_schema_password", f"target_schema_password:{schema}", "target-schema password")
+        wallet_password = request_secret(state, "wallet_password", "admin_wallet_password", "wallet password")
+        rows = list_target_agent_config(state, schema, password, request.form.get("service_name", ""), wallet_password)
+        state["sample_settings"] = {"target_schema": schema}
+        set_section_feedback(state, "target-select-ai", f"Read {len(rows)} SELECTAI_AGENT_CONFIG row(s) in {schema}.", "success")
+    except Exception as exc:
+        if "ORA-00942" in str(exc):
+            state["target_agent_config"] = []
+            set_section_feedback(state, "target-select-ai", "SELECTAI_AGENT_CONFIG is not installed in this target schema. This is normal for samples that do not use that table.", "success")
+        else:
+            set_section_feedback(state, "target-select-ai", f"Agent configuration read failed: {str(exc)[:1_500]}", "error")
+    return redirect(url_for("agent_config_page"))
+
+
+@app.post("/select-ai/agent-config/update")
+def target_agent_config_update_route():
+    state = volatile_state()
+    try:
+        schema = checked_identifier(request.form.get("target_schema", ""), "Target schema")
+        password = request_secret(state, "target_schema_password", f"target_schema_password:{schema}", "target-schema password")
+        wallet_password = request_secret(state, "wallet_password", "admin_wallet_password", "wallet password")
+        agent_name = request.form.get("agent_name", "") or request.form.get("team_name", "")
+        config_key = request.form.get("config_key", "") or "AGENT_AI_PROFILE"
+        config_value = request.form.get("config_value", "") or request.form.get("profile_name", "")
+        update_target_agent_config(state, schema, password, agent_name, config_key, config_value, request.form.get("service_name", ""), wallet_password)
+        rows = list_target_agent_config(state, schema, password, request.form.get("service_name", ""), wallet_password)
+        state["sample_settings"] = {"target_schema": schema}
+        set_section_feedback(state, "target-select-ai", f"Saved {checked_identifier(config_key, 'Configuration key')} for {checked_identifier(agent_name, 'Agent name')}.", "success")
+    except Exception as exc:
+        set_section_feedback(state, "target-select-ai", f"Agent configuration update failed: {str(exc)[:1_500]}", "error")
+    return redirect(url_for("agent_config_page"))
+
+
+@app.post("/select-ai/agent-config/delete")
+def target_agent_config_delete_route():
+    state = volatile_state()
+    try:
+        if request.form.get("confirmation", "").strip() != "DELETE KEY":
+            raise ValueError("Type DELETE KEY to remove a configuration row.")
+        schema = checked_identifier(request.form.get("target_schema", ""), "Target schema")
+        password = request_secret(state, "target_schema_password", f"target_schema_password:{schema}", "target-schema password")
+        wallet_password = request_secret(state, "wallet_password", "admin_wallet_password", "wallet password")
+        agent_name = request.form.get("agent_name", "")
+        config_key = request.form.get("config_key", "")
+        delete_target_agent_config(state, schema, password, agent_name, config_key, request.form.get("service_name", ""), wallet_password)
+        rows = list_target_agent_config(state, schema, password, request.form.get("service_name", ""), wallet_password)
+        state["sample_settings"] = {"target_schema": schema}
+        set_section_feedback(state, "target-select-ai", f"Deleted {checked_identifier(config_key, 'Configuration key')} for {checked_identifier(agent_name, 'Agent name')}.", "success")
+    except Exception as exc:
+        set_section_feedback(state, "target-select-ai", f"Agent configuration deletion failed: {str(exc)[:1_500]}", "error")
+    return redirect(url_for("agent_config_page"))
+
+
+@app.post("/select-ai/profile/delete")
 def target_select_ai_profile_delete_route():
     state = volatile_state()
     try:
@@ -2093,7 +2596,7 @@ def target_select_ai_profile_delete_route():
     return redirect(url_for("sample_data_page", view="cleanup"))
 
 
-@app.post("/sample-data/select-ai/credential/delete")
+@app.post("/select-ai/credential/delete")
 def target_select_ai_credential_delete_route():
     state = volatile_state()
     try:
@@ -2318,6 +2821,27 @@ def admin_test_route():
     return redirect(url_for("connect_page", view="admin"))
 
 
+@app.post("/target/test")
+def target_test_route():
+    state = volatile_state()
+    try:
+        schema = checked_identifier(request.form.get("target_schema", ""), "Target schema")
+        password = request_secret(state, "target_schema_password", f"target_schema_password:{schema}", "target-schema password")
+        with target_schema_connection(state, schema, password, request.form.get("service_name", ""), request_secret(state, "wallet_password", "admin_wallet_password", "wallet password")) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') FROM DUAL")
+                row = cursor.fetchone()
+        state["target_connection_ok"] = True
+        state["target_connection_summary"] = str(row[0]) if row else schema
+        state["sample_settings"] = {"target_schema": schema}
+        save_last_settings({"target_schema": schema})
+        set_section_feedback(state, "target-connection", f"Target database connection passed as {state['target_connection_summary']}.", "success")
+    except Exception as exc:
+        state.pop("target_connection_ok", None)
+        set_section_feedback(state, "target-connection", f"Target connection failed: {str(exc)[:1_500]}", "error")
+    return redirect(url_for("connect_page", view="admin"))
+
+
 @app.post("/select-ai/setup")
 def select_ai_setup_route():
     state = volatile_state()
@@ -2443,7 +2967,28 @@ def select_ai_routing_route():
 
 @app.get("/agents")
 def agents_page():
-    return render_workspace("agents.html", f"setup-agents-{request.args.get('view', 'readiness')}")
+    view = request.args.get("view", "installed")
+    if view in {"refresh", "delete"}:
+        return redirect(url_for("agents_page", view="installed"))
+    if view != "installed":
+        return redirect(url_for("agents_page", view="installed"))
+    return render_workspace("agents.html", f"setup-agents-{view}")
+
+
+@app.post("/agents/installed")
+def agents_installed_route():
+    state = volatile_state()
+    try:
+        schema = checked_identifier(request.form.get("target_schema", ""), "Target schema")
+        password = request_secret(state, "target_schema_password", f"target_schema_password:{schema}", "target-schema password")
+        wallet_password = request_secret(state, "wallet_password", "admin_wallet_password", "wallet password")
+        teams = list_target_schema_teams(state, schema, password, request.form.get("service_name", ""), wallet_password)
+        state["sample_settings"] = {"target_schema": schema}
+        stored = load_last_settings(); stored.update({"target_schema": schema}); save_last_settings(stored)
+        set_section_feedback(state, "agents", f"SQL owner-side refresh found {len(teams)} team(s) in {schema}.", "success")
+    except Exception as exc:
+        set_section_feedback(state, "agents", f"Installed-team SQL refresh failed: {str(exc)[:1_500]}", "error")
+    return redirect(url_for("agents_page", view="installed"))
 
 
 @app.post("/agents/refresh")
@@ -2456,7 +3001,7 @@ def agents_refresh():
     except (ValueError, RuntimeError, requests.RequestException) as exc:
         set_section_feedback(state, "agents", str(exc), "error")
         flash(str(exc), "error")
-    return redirect(url_for("agents_page", view="refresh"))
+    return redirect(url_for("agents_page", view="installed"))
 
 
 @app.post("/agents/team")
@@ -2498,22 +3043,18 @@ def agents_readiness_route():
 
 @app.post("/agents/install")
 def agents_install_route():
+    """Retired endpoint retained only to give old bookmarks a safe handoff."""
     state = volatile_state()
-    try:
-        if request.form.get("confirmation", "").strip() != "INSTALL SAMPLE":
-            raise ValueError("Type INSTALL SAMPLE to deploy or refresh the selected sample package.")
-        sample_name = request.form.get("sample_name", "")
-        schema = checked_identifier(request.form.get("target_schema", ""), "Target schema")
-        profile = checked_identifier(request.form.get("profile_name", ""), "Select AI profile")
-        form = {key: request.form.get(key, "").strip() for key in request.form}
-        if sample_name == "database-provisioning":
-            form["target_schema_password"] = request_secret(state, "target_schema_password", f"target_schema_password:{schema}", "target-schema password")
-        team_name = deploy_sample(state, sample_name, schema, profile, form)
-        state["sample_agent_installed"] = True
-        set_section_feedback(state, "agents", f"Installed {sample_name} in {schema}; published team {team_name}. Refresh A2A discovery next.", "success")
-    except Exception as exc:
-        set_section_feedback(state, "agents", f"Sample agent installation failed: {str(exc)[:1_500]}", "error")
-    return redirect(url_for("agents_page", view="install"))
+    set_section_feedback(state, "agents", "In-console sample deployment is disabled. Install the selected Oracle sample with SQLcl, then use Installed teams · SQL to verify it.", "success")
+    return redirect(url_for("agents_page", view="installed"))
+
+
+@app.post("/agents/preview")
+def agents_preview_route():
+    """Retired endpoint retained only to give old bookmarks a safe handoff."""
+    state = volatile_state()
+    set_section_feedback(state, "agents", "In-console sample preview is disabled. Review and run Oracle's upstream SQLcl scripts directly.", "success")
+    return redirect(url_for("agents_page", view="installed"))
 
 
 @app.post("/inferencing/team")
@@ -2522,7 +3063,7 @@ def inferencing_team_route():
     try:
         load_team_card(state, request.form.get("team_name", ""))
         state["chat_history"] = []
-        for key in ("a2a_context_id", "pending_a2a_task_id", "last_a2a_task_id", "last_a2a_task_state", "last_a2a_task_diagnostic"):
+        for key in ("a2a_context_id", "pending_a2a_task_id", "last_a2a_task_id", "last_a2a_task_state", "last_a2a_task_diagnostic", "last_a2a_request"):
             state.pop(key, None)
         set_section_feedback(state, "inferencing", f"Selected {state['selected_team']} and loaded its Agent Card.", "success")
     except (ValueError, RuntimeError, requests.RequestException) as exc:
@@ -2564,7 +3105,7 @@ def inferencing_task_status_route():
 def inferencing_chat_reset_route():
     """Forget local A2A conversation state; it does not cancel a server task."""
     state = volatile_state()
-    for key in ("chat_history", "a2a_context_id", "pending_a2a_task_id", "last_a2a_task_id", "last_a2a_task_state", "last_a2a_task_diagnostic"):
+    for key in ("chat_history", "a2a_context_id", "pending_a2a_task_id", "last_a2a_task_id", "last_a2a_task_state", "last_a2a_task_diagnostic", "last_a2a_request"):
         state.pop(key, None)
     set_section_feedback(state, "inferencing", "Started a new local conversation. Any prior server task was not canceled.", "success")
     return redirect(url_for("test_chat_page"))

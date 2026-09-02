@@ -1,595 +1,330 @@
 # Oracle A2A Demo — UI Context
 
-The workflow required to set up Agent-2-Agent (A2A) is somewhat complex.  Assuming we want to create a new Autonomous Database with the correct tags, enable Select AI with a profile, and then enable users for inferencing, there are several steps.
+## Purpose
 
-## Product Description
+This local Flask console guides preparation of an Oracle Autonomous AI Database
+for Select AI Agents and then tests a published team through external A2A. It
+is a setup, validation, and troubleshooting aid; it is not a production control
+plane and does not install Oracle sample packages.
 
-This is a local Flask demo console for preparing an Oracle Autonomous AI
-Database for A2A, configuring Select AI, managing published agent teams, and
-testing A2A access and Select AI chat.
+The console keeps three kinds of evidence distinct:
 
-The app runs locally. It uses local OCI CLI profiles for OCI operations and a
-locally downloaded wallet for database ADMIN operations.
+- A target-schema `DBMS_CLOUD_AI.GENERATE` call proves the credential, Select
+  AI profile, model access, and relevant IAM/network prerequisites work.
+- External OAuth, published-team discovery, and an Agent Card prove the A2A
+  boundary is reachable by an external client.
+- A completed chat task separately proves the database agent runtime completed
+  work. An accepted A2A request can still fail or remain `RUNNING` internally.
 
-## Primary workflow
+Use [SQL_VALIDATION.md](SQL_VALIDATION.md) for database-side checks and
+[OAUTH_VALIDATION.md](OAUTH_VALIDATION.md) for command-line OAuth validation.
 
-### Setup, once per environment
+## Overall process
 
-1. Provision or select an Autonomous AI Database, download a wallet, and test
-   ADMIN.
-2. Create/select the controlled target schema and sample data.
-3. Use ADMIN to apply/verify the idempotent target-schema package grants.
-4. Create and validate the provider credential and Select AI profile owned by
-   the target schema.
-5. Install and validate the sample tools, agent, and team.
-6. Register an external OAuth client with ADMIN when required.
+1. Select OCI context and provision or identify an Autonomous AI Database.
+2. Check lifecycle, download its wallet, and test an ADMIN connection.
+3. Create a target schema if required, then test a connection as it. That test
+   selects the active target schema for user-level setup.
+4. Enable target-schema Resource Principal access when needed, and create/test
+   the target-owned Select AI credential and profile.
+5. Install an Oracle agent/team sample manually with SQLcl, following the
+   upstream sample instructions.
+6. Confirm the owner can see its installed team from SQL.
+7. Register an external OAuth client as ADMIN when needed.
+8. In A2A Testing, obtain a token, discover a published team, load its Agent
+   Card, and chat.
 
-### A2A testing, repeat whenever needed
+Do not diagnose A2A chat before Select AI works as the target schema and the
+team appears in `DBMS_CLOUD_AI_AGENT.LIST_TEAMS()` for that schema.
 
-1. Obtain an external OAuth authorization-code token.
-2. Discover/select a published team and load its Agent Card.
-3. Send an A2A chat request and inspect task progress or diagnostics.
+## Operating modes
 
-### Current validation boundary
+### Setup
 
-The guided setup and external OAuth/discovery/card path have been exercised
-against a paid ATP instance. A database-side chat can still remain `RUNNING`
-after that setup succeeds. The UI must describe this accurately: token,
-published-team discovery, and Agent Card retrieval prove the external A2A
-boundary; they do not prove database Select AI Agent task completion. The chat
-page retains task diagnostics, while `SQL_VALIDATION.md` supplies the
-database-native runtime checks.
+Setup is the administrator and target-schema-owner workflow. It contains OCI
+context, database lifecycle, wallet connections, database users, Resource
+Principal access, target Select AI setup, manual SQLcl installation checks, and
+OAuth client registration. It may need ADMIN credentials, a wallet, and a
+target-schema password.
 
-## Implemented information architecture
+### A2A Testing
 
-The console is divided into two deliberate halves. A user should be able to
-enter the A2A testing half directly after an environment has been configured,
-without navigating through provisioning, wallet, or agent-installation forms.
+A2A Testing is the external-client workflow. It assumes setup and team
+installation already exist. It contains the authorization-code flow, published
+team discovery, Agent Card loading, and A2A chat. It intentionally omits OCI,
+wallet, ADMIN, and target-schema setup controls.
 
-### Start page
+## Shared layout
+
+### Left navigation
+
+The persistent left outline is the primary navigation. **A2A Testing** appears
+first so a ready environment can go straight to testing; **Setup** follows in
+the intended configuration order. The active page is highlighted. Green visited
+markers are browser-session navigation history, not success evidence.
+
+### Center pane
+
+The center pane has one focused topic per page, normally one or two cards.
+Fields are vertically stacked. Buttons are disabled when local prerequisites,
+such as a wallet, are unavailable.
+
+### Right help and Setup Status
+
+The right pane explains the page, prerequisites, ownership, and destructive
+effects. On Setup pages it also presents clickable **Setup Status** items,
+ordered as:
+
+1. OCI profile
+2. Wallet downloaded
+3. Database lifecycle
+4. DB connection (ADMIN)
+5. DB connection (Target)
+6. Select AI profile
+7. Agent Teams
+8. OAuth registration
+
+There is no Target Schema status item: a successful target connection is the
+authoritative selection of the target user. Select AI status can include both
+the profile and credential, for example `A2A_PROFILE - OCI$RESOURCE_PRINCIPAL`.
+
+### Bottom activity log
+
+The fixed bottom dock is a timestamped, newest-first local activity log. It
+shows about three entries before scrolling and never shows passwords, private
+keys, OAuth tokens, authorization codes, or client secrets.
+
+## State and security
+
+- OCI context, database OCID, service alias, non-secret schema/profile names,
+  and safe metadata can be retained locally.
+- Wallet files are local under ignored `wallet/`.
+- Passwords, private keys, provider secrets, authorization codes, refresh and
+  access tokens, and returned OAuth client secrets are memory-only. Passwords
+  may be displayed as masked values for the current app process.
+- ADMIN performs environment work and grants. The target schema owns its
+  credentials, profiles, packages, tools, tasks, agents, and teams.
+- `CURRENT_SCHEMA` is not a target-user login: Select AI Agent execution needs
+  a real target-schema connection with the correct `SESSION_USER`.
+
+## Overview pages
 
 | Page | Route | Purpose |
 | --- | --- | --- |
-| Start | `/` | Concise entry point with two large choices: **Setup** and **A2A Testing**. Show the last non-secret readiness summary only. |
-| Setup overview | `/setup` | Explain the one-time configuration path and link to Infra & Admin, User-Level Setup, and Setup Readiness. |
-| A2A Testing | `/test` | Explain the external-client test path and link to OAuth Token, Team Selection, and Chat. |
-
-The Start page must not attempt discovery, credentials, database connections,
-or token acquisition. It is navigation and status only.
-
-### Shared shell and workflow outline
-
-The shared shell uses a persistent left-hand workflow outline on desktop
-(roughly the leftmost 10–15% of the window) and a compact responsive outline
-above the content on smaller screens. It replaces repeated top-page tabs.
-
-The outline order is intentional:
-
-1. **A2A Testing**: testing overview, OAuth · Get Token, Team Selection, Chat.
-2. **Setup**: setup overview, Infra & ADMIN, Target User, Package Readiness,
-   OAuth · Register.
-
-The active item is highlighted. Pages visited during the current local browser
-session receive a green check/visited treatment. This is navigation history,
-not proof that a configuration is valid.
-
-Do not mix setup controls into the testing workflow or testing controls into
-setup pages. The outline makes both paths visible without repeating navigation
-cards in every page body.
-
-Local package steps declare their execution identity. Environment grants and
-cross-schema function DDL can run through ADMIN; Select AI Agent objects must
-be created through a real connection as the target schema, because
-`ALTER SESSION SET CURRENT_SCHEMA` does not change `SESSION_USER`. The console
-asks for that target password only for the deployment request and never saves
-it.
-
-### Setup half
-
-Setup contains two categories plus one final readiness page.
-
-| Page | Route | Scope |
-| --- | --- | --- |
-| Setup · Infra & Admin | `/setup/infra` | Environment-level guide linking to OCI provisioning/context (`/setup/infra/provision`), lifecycle/wallet/ADMIN (`/connect`), and OAuth registration (`/oauth-clients`). |
-| Setup · User-Level | `/setup/user` | Target schema/data, target-schema provider credential, target-schema Select AI profile, sample tools, agent, and team. These are owned by the target database user, such as `DEMO_SALES`. |
-| Verify Demo | `/setup` (`#verify`) | Read-only preflight that checks saved OCI context, local wallet, current ADMIN session, target-schema enabled profile, and discovered target-schema agent objects. |
-| Package Readiness | `/agents` (`#readiness`) | Package-specific data/profile validation before deployment or external testing. |
-
-#### Bottom dock
-
-The bottom dock is not a second navigation system. It is an environment and
-action summary: known profile/region, wallet and ADMIN state, target schema and
-profile, OAuth client/token metadata, database lifecycle, and the most recent
-action result. It never exposes secrets.
-
-`Verify Demo` does not obtain an OAuth token. It requires the current-memory
-ADMIN connection to perform live database checks, so after an app restart it
-truthfully asks the user to re-test ADMIN. A successful preflight means setup
-prerequisites are present; external OAuth, A2A discovery, and chat remain
-separate testing checks.
-
-#### Setup ordering
-
-1. **Infra & Admin**
-   - Select OCI profile and region once.
-   - Provision/select the database, inspect lifecycle, download/replace the
-     wallet, and test ADMIN.
-2. **User-Level**
-   - Select/create target schema and controlled demo data.
-   - Immediately run the visible, idempotent ADMIN grant step for the target
-     schema: `EXECUTE` on `DBMS_CLOUD`, `DBMS_CLOUD_AI`, and
-     `DBMS_CLOUD_AI_AGENT`; show the verified grants.
-   - Use the tested wallet/service context while authenticating as the target
-     schema to create/list/delete its provider credential and Select AI
-     profile.
-   - Install or refresh the sample agent tools and team.
-3. **Readiness**
-   - Run only validation queries and show object/profile status.
-   - Do not make users obtain a token, discover teams, or send chat here.
-
-### A2A Testing half
-
-A2A Testing assumes setup already exists. It must contain only the controls an
-external user needs to get a token, choose a published team, and chat.
-
-| Page | Route | Scope |
-| --- | --- | --- |
-| OAuth · Get Token | `/test/token` | Optional local callback listener, authorization-code flow, token exchange, safe token metadata, and A2A discovery. No ADMIN password or OCI profile requirement. |
-| Team Selection | `/test/team` | Select a discovered published team and load its Agent Card. |
-| Chat | `/test/chat` | A2A JSON-RPC chat and task polling/diagnostics only. |
-
-OAuth client registration remains a setup administration capability because it
-requires ADMIN. It is linked from Setup · Infra & Admin and is not part of the
-normal external testing flow.
-
-#### A2A Testing dock
-
-The testing dock shows exactly two items:
-
-1. **OAuth token** — present/expired state plus expiry, scope, and source;
-   never the token value.
-2. **Team selection** — selected published team and Agent Card loaded state.
-
-It intentionally omits OCI profile, wallet, ADMIN connection, target schema,
-database lifecycle, and setup checkmarks. These are prerequisites, not an
-external test user's workflow.
-
-#### A2A Testing ordering
-
-1. **OAuth Token**
-   - Show a simple authorization-code path: prepare endpoints, optional
-     same-machine callback listener, authorize, exchange, and discover.
-   - Keep client secret, authorization code, refresh token, and access token
-     in process memory only.
-2. **Team Selection**
-   - Use the active external token to show discovered teams and select one.
-   - Load the Agent Card before enabling chat.
-3. **Chat**
-   - Send `message/send`, wait briefly for task completion, then retain manual
-     `tasks/get` status checks for slower tasks.
-   - Show the most recent non-secret task diagnostic and link to SQL history
-     guidance for failures.
-   - Clearly distinguish an A2A task that was accepted from a database agent
-     task that completed. A `RUNNING` task is a runtime diagnostic, not a
-     successful answer.
-
-### Migration rules
-
-- The start, Setup, and A2A Testing shells are implemented. They preserve the
-  existing backend operations and persistence rules; this remains a UI
-  reorganization, not a new database model.
-- Existing operation pages remain available as focused working pages and are
-  linked from the appropriate half. `/inferencing` redirects to `/test/chat`.
-- The detailed page-level sections below remain the behavioral reference for
-  the focused operation pages.
-
-
-## Shared UI components
-
-### Header navigation
-
-Every page uses the same top-level navigation. The current page is visually
-active. Navigation must always use real routes, not hidden client-side panels.
-
-### Status dock
-
-Every page includes a fixed bottom status dock scoped to its half of the
-console.
-
-- **Setup pages:** show the combined Infra, User-Level, and Setup-ready
-  checklists defined above. The wallet detail shows only its base directory;
-  the full per-database path is a mouseover tooltip.
-- **A2A Testing pages:** show only OAuth token and Team selection, as defined
-  above.
-- Both docks show the latest relevant action result, never secrets, and link
-  items to the appropriate real page and section.
-
-
-### Sidebar Help
-
-On each page, a right-side "card" exists which shows a help description for the entire page.  If anything is required before proceeding, it should be called out here.  Keep this looking like a column on the page where 75% of the left side of the page is reserved for real content, and 25% o nthe right for this help card.
-
-## Page details
-
-### Database · Connection
-
-Sections, in order:
-
-1. **Profile Selection**
-   - OCI CLI profile and region to use, if overridden
-   - Persist this when it changes
-   - Profile will be used in other places
-   - Show named profile in bottom dock once selected
-   - This is the only editable OCI profile/region selector. Provisioning,
-     deletion, database lifecycle checks, and wallet download display and use
-     this saved context rather than offering conflicting selectors.
-
-2. **Provision DB**
-   - OCI CLI profile and region
-   - Compartment, database/display name, and Vault secret reference
-   - ATP Free, ATP Dev, and ATP Paid selection
-   - ECPU and storage in GB for Paid only
-   - A2A feature tag is added by the provisioning request
-
-3. **Delete DB**
-   - Requires exact OCID re-entry and `DELETE` confirmation
-   - Is intentionally destructive and must remain clearly marked
-
-### Setup · Infra
-
-Sections, in order:
-
-1. **Database Status**
-   - Database OCID pre-populated from persistent settings
-   - Update bottom dock with database name and lifecycle once checked
-   - Display the profile and region selected on **Setup · Infra**; do not offer
-     a second selector.
-
-2. **Wallet download**
-   - Display and use the selected profile and region; do not offer a second
-     selector.
-   - Require Lifecycle status check before wallet download
-   - Wallet files are stored locally under the ignored `wallet/` directory
-   - Confirm overwrite if wallet is downloaded again
-   - Bottom dock indicates whether wallet is present to avoid re-download
-
-3. **ADMIN connection**
-   - Use the downloaded wallet and the selected profile/region context.
-   - Lifecycle status check required before connection attempt
-   - Wallet should exist before connection test is enabled
-   - ADMIN connection test uses wallet service alias, database password, and
-     wallet password
-   - Bottom dock to show connection test status
-
-### Setup · Select AI
-
-Sections, in order. Should allow full lifecycle of creation, inspection, and
-deletion of credentials and profiles.
-
-1. **Create credential**
-   - Supported authentication: OCI API-signing key, OCI Resource Principal,
-     and OpenAI API key.
-   - OCI API-key flow uses a selected local API-signing private-key file; the
-     key is read for the request only and is not persisted.
-   - OCI Resource Principal uses the database-managed
-     `OCI$RESOURCE_PRINCIPAL` credential. The console enables principal
-     authentication for ADMIN or the selected target schema and creates a
-     profile that references that fixed credential. It does not create, store,
-     inspect, or delete a second credential object.
-   - The user configures the Resource Principal dynamic group and OCI IAM
-     policies outside the console. The UI requires only the OCI Generative AI
-     compartment, with optional region and model.
-   - Credential names and non-secret OCI settings are persisted locally
-   - The selected credential name is shown in the bottom dock. For Resource
-     Principal, it is always `OCI$RESOURCE_PRINCIPAL`.
-
-3. **Create Select AI Profile**
-   - Supported providers: OCI Generative AI and OpenAI only
-   - Credential name required
-   - Create/Update button will either create or update named profile
-   - Profile name and non-secret OCI settings are remembered
-   - Profile name shown on bottom dock
-
-3. **Manage profiles**
-   - Refresh list of profiles in the connected ADMIN schema
-   - Requires ADMIN connection to exist
-   - Inspect a selected profile; show all attributes
-
-4. **Manage credentials**
-   - Refresh list of credentials in the connected ADMIN schema
-   - Requires ADMIN connection to exist
-   - Inspect a selected credential; show all attributes except private key
-
-4. **Delete profile**
-   - Requires `DELETE` confirmation
-   - Deletes the Select AI profile via SQL, not its DBMS_CLOUD credential
-
-5. **Delete credential**
-   - Requires `DELETE` confirmation
-   - Current behavior deletes the DBMS_CLOUD credential
-
-### Data · Sample Schema
-
-This page comes before Agents. It creates a controlled, portable demo dataset
-for the Oracle AI Database Agent and selects the schema in which the sample
-tools and team will operate.
-
-Sections, in order:
-
-1. **Target schema selection**
-   - Select an existing target schema or create a dedicated controlled demo
-     schema.
-   - Persist the non-secret target schema name only.
-   - Clearly distinguish the connected ADMIN user from the target schema.
-   - The status dock shows the selected target schema once it is created or
-     verified.
-
-2. **Controlled sample data**
-   - Offer a portable `DEMO_SALES` dataset suitable for NL2SQL, filtering,
-     date-range questions, aggregation, and charts.
-   - Creation requires the exact confirmation `CREATE SAMPLE DATA`.
-   - Show every created table and its row count.
-   - Never overwrite existing tables. A reset/cleanup action is separate,
-     destructive, and requires `DELETE SAMPLE DATA` confirmation.
-
-3. **Select AI data access**
-   - Create the provider credential and selected Select AI profile in the
-     target schema itself. The tested ADMIN connection provides the wallet and
-     service context, but an ADMIN-owned API-key credential/profile cannot be
-     used by agent tools executing as the target schema. Resource Principal is
-     database-managed, but it must be enabled for the target schema and the
-     profile itself is still target-schema owned.
-   - Before the target-schema connection, use ADMIN to grant `EXECUTE` on
-     `DBMS_CLOUD`, `DBMS_CLOUD_AI`, and `DBMS_CLOUD_AI_AGENT` to that schema.
-   - Collect the target-schema password and provider secret/key only for this
-     request; never persist either value. Resource Principal needs no provider
-     secret, user OCID, tenancy OCID, fingerprint, or private key.
-   - Run a stateless `DBMS_CLOUD_AI.GENERATE` test as the target schema after
-     creation. For non-OCI providers, explain that the target schema also
-     needs the required network ACL.
-   - List the target schema's profile names/statuses and user-owned credential
-     names without exposing secrets. Explain that the system-managed
-     `OCI$RESOURCE_PRINCIPAL` might not appear in that list. Permit profile deletion only with `DELETE
-     PROFILE` confirmation and credential deletion only with `DELETE
-     CREDENTIAL`; advise deleting the profile first.
-   - Present a safe metadata/readiness result in the status dock.
-   - Explain when the profile and target schema must be aligned, or when an
-     explicitly supported cross-schema configuration is required.
-
-### Agents / Teams
-
-This page deploys a selected local sample package, while retaining A2A
-discovery and team deletion. Each package owns a directory under `samples/`
-with a manifest, ordered scripts, prerequisites, and one published team.
-A target schema can host multiple packages when their object names do not
-overlap.
-
-Sections, in order:
-
-1. **Choose package and check readiness**
-   - Offer `sales-data` (Oracle's pinned upstream data-query sample) and
-     `database-provisioning` (the local resource-principal sample).
-   - Select the target schema and an editable Select AI profile. Remembered
-     profiles are suggested, and an existing profile may be entered directly.
-   - Data validation is package-specific: Sales Data requires controlled sales
-     tables; Database Provisioning has no data dependency.
-   - Also inspect whether the expected package, configuration table, tools,
-     task, agent, and team already exist.
-   - Link the status dock's target-schema item to this readiness section.
-
-2. **Deploy or refresh package**
-   - Require a ready target schema, enabled target-schema profile, and the
-     exact confirmation `INSTALL SAMPLE`.
-   - Sales Data downloads the two named Oracle scripts only when their
-     SHA-256 values match the package manifest.
-   - Database Provisioning runs local parameterized scripts and requests its
-     tenancy, compartment, home-region, and Vault-secret OCIDs only for the
-     current deployment. It must be installed in a least-privileged schema.
-   - A package replaces only its own task, agent, tools, and team.
-
-3. **Refresh teams**
-   - Requires ADMIN connection and current OAuth token.
-   - Repeats A2A discovery, persists non-secret team metadata, and provides a
-     button to load each Agent Card in **A2A Testing → Team Selection**.
-
-4. **Delete team**
-   - Requires exact team name and `DELETE` confirmation.
-   - The default action deletes only the selected team.
-   - Any cleanup of the sample task, agent, tools, package, configuration
-     table, or sample data is a separate destructive action with its own
-     confirmation.
-
-### OAuth · Register
-
-This dedicated page registers OAuth clients for external A2A clients, such as
-Google Gemini Enterprise. It is separate from the external authorization-code
-token flow on **OAuth · Get Token**.
-
-The page requires a successful ADMIN wallet connection. Oracle permits only
-the database `ADMIN` user to register these client credentials.
-
-Sections, in order:
-
-1. **Registration prerequisites**
-   - Display the selected OCI profile, region, database OCID, and connected
-     ADMIN user.
-   - Validate that the database OCID and region are available before enabling
-     registration.
-   - Explain that the client is registered through the A2A registration
-     endpoint, not with a database SQL statement.
-
-2. **Register OAuth client**
-   - Collect a client name and one or more redirect URIs.
-   - For Google Enterprise, instruct the user to copy the exact callback URI
-     supplied by the Google Enterprise connector configuration UI. Do not
-     invent or hard-code a Google callback URI.
-   - For a local authorization-code test, offer the console's currently active
-     loopback callback URI, such as `http://127.0.0.1:5000/oauth/callback`.
-     Clearly state that this is for a browser on the same machine only and
-     must be accepted by the Oracle registration service.
-   - Validate the client name, each external HTTPS redirect URI, the loopback
-     exception, and duplicate URIs locally before sending the registration
-     request.
-   - Use the documented registration endpoint:
-     `POST /adb/auth/v1/connect/databases/{database-ocid}/register`.
-   - Authenticate as the connected ADMIN user and send `client_name` plus
-     `redirect_uris` only.
-   - Persist non-secret metadata only: client name, client ID, redirect URIs,
-     timestamps, grant types, and expiry metadata.
-   - Never persist, log, render in the status dock, or return the client
-     secret after the one-time result view.
-   - Present a prominent one-time warning: copy the returned client ID and
-     client secret now. The secret is shown only in this result view; the user
-     must configure it in the external A2A client's documented OAuth flow.
-   - The status dock indicates that an OAuth client exists, using its client
-     name or client ID but never the secret.
-
-3. **List and inspect OAuth clients**
-   - Show locally persisted non-secret registration metadata and any live list
-     endpoint that Oracle documents for this A2A client-registration API.
-   - Before implementation, verify the supported live list endpoint and its
-     authorization model; do not invent an undocumented endpoint.
-   - Clearly distinguish locally remembered registrations from a live database
-     inventory.
-
-4. **Registration inventory and retirement**
-   - Show only locally remembered non-secret registration metadata unless
-     Oracle documents a supported live list endpoint.
-   - Do not present a local delete button as revocation. Client retirement must
-     use Oracle's supported administration surface; the app has no live A2A
-     client deletion endpoint at this time.
+| Start | `/` | Offers Setup or A2A Testing without performing an operation. |
+| Setup overview | `/setup` | Explains setup and offers a read-only Verify Demo preflight. |
+| A2A Testing overview | `/test` | Explains the token → team → chat workflow. |
+
+Verify Demo checks saved OCI context, wallet presence, current ADMIN session,
+target profile, and owner-side agent objects. It does not obtain OAuth tokens,
+discover teams, or send chat. An app restart correctly requires ADMIN to be
+tested again because the connection is memory-only.
+
+## Setup pages
+
+### OCI Context
+
+**Route:** `/setup/infra/provision?view=context`
+
+Selects the OCI CLI profile and OCI region. This is the only page that edits
+that context; all other infrastructure pages use it rather than providing
+competing selectors.
+
+### Provision Database
+
+**Route:** `/setup/infra/provision?view=provision`
+
+Creates an Autonomous Database with the saved OCI context. It collects the
+compartment, database/display names, workload/deployment selection, compute,
+storage, and required secret reference. The resulting database OCID is retained
+as non-secret local context. Wait for `AVAILABLE` before the wallet flow.
+
+### Database Lifecycle
+
+**Route:** `/connect?view=status`
+
+Checks the selected database OCID's lifecycle. `AVAILABLE` is the expected
+ready state and is a prerequisite for wallet operations.
+
+### Download / Replace Wallet
+
+**Route:** `/connect?view=wallet`
+
+Downloads the wallet for the selected database after lifecycle is available. A
+new download replaces a local wallet copy. Status shows the wallet base path,
+not the per-database or secret detail.
+
+### Database Connections
+
+**Route:** `/connect?view=admin`
+
+Contains two independent tests:
+
+1. **ADMIN connection** validates the wallet service alias, wallet password,
+   and ADMIN password.
+2. **Target connection** validates the target schema password with the same
+   wallet context. A successful result selects that schema for the rest of
+   Setup.
+
+Creating a schema does not select it. Return here after schema creation and
+test the new user's connection.
+
+### OAuth Registration
+
+**Route:** `/oauth-clients?view=register`
+
+ADMIN registers an OAuth client for an external A2A consumer. The page explains
+production and local-test callback URIs, shows the returned client secret once,
+and retains only safe registration metadata for listing/deletion. The secret
+must be copied to OAuth · Get Token and is never persisted. See Oracle's
+[OAuth registration documentation](https://docs.oracle.com/en-us/iaas/autonomous-database-serverless/doc/register-oauth-client-oauth.html).
+
+### Target Schema
+
+**Route:** `/select-ai?view=schema`
+
+ADMIN creates a dedicated database user and idempotently grants `EXECUTE` on
+`DBMS_CLOUD`, `DBMS_CLOUD_AI`, and `DBMS_CLOUD_AI_AGENT`. This page creates no
+demo data and does not select the user. Use Database Connections to connect as
+the new user before proceeding.
+
+### Resource Principal
+
+**Route:** `/resource-principal`
+
+Enables, checks, or disables `OCI$RESOURCE_PRINCIPAL` for the selected target
+schema only. It requires ADMIN connection and a selected target connection.
+OCI dynamic groups and IAM policies remain tenancy-side prerequisites outside
+the app; follow Oracle's [Resource Principal documentation](https://docs.oracle.com/en-us/iaas/autonomous-database-serverless/doc/resource-principal.html).
+
+### Target Select AI
+
+**Route:** `/select-ai?view=select-ai`
+
+Creates and tests the selected target schema's provider credential and Select
+AI profile. Supported provider choices are OCI API-signing key, OCI Resource
+Principal, and OpenAI where supported by the database. The target user—not
+ADMIN—owns these resources.
+
+It can list target-owned profiles and credentials and executes a minimal Select
+AI test. Resource Principal uses database-managed
+`OCI$RESOURCE_PRINCIPAL` and does not create a user-owned credential row. Fix a
+failed or hanging Select AI test before troubleshooting an agent team.
+
+### Select AI Agent Configs
+
+**Route:** `/agent-config`
+
+Reads and manages a sample-owned optional `SELECTAI_AGENT_CONFIG` table using
+the target-schema connection. It can add, update, or delete one `AGENT` +
+`KEY` mapping. It does not create profiles, credentials, agents, or teams. A
+missing table is normal for samples that do not use this pattern.
+
+### Installed Teams · SQL
+
+**Route:** `/agents?view=installed`
+
+The app has no local samples directory and does not deploy sample scripts.
+Install samples with SQLcl using Oracle's [Autonomous AI Agent samples](https://github.com/oracle-devrel/oracle-autonomous-database-samples/tree/main/autonomous-ai-agents).
+
+This page then connects as the selected target schema and runs:
+
+```sql
+SELECT DBMS_CLOUD_AI_AGENT.LIST_TEAMS() FROM dual;
+```
+
+It requires no OAuth token and is the owner-side confirmation that a manual
+installation is visible to the user who owns it.
+
+### Published Teams · A2A
+
+**Route:** `/agents?view=refresh`
+
+This retained diagnostic calls external A2A discovery using the in-memory OAuth
+token. It is distinct from the SQL owner check and is not a primary Setup step;
+normal external discovery occurs in A2A Testing → Team Selection.
+
+### Delete Target Schema
+
+**Route:** `/schema-cleanup`
+
+The final target-user cleanup requires ADMIN, a selected target, and the exact
+confirmation `DELETE SCHEMA`. It disables schema Resource Principal access when
+present, then runs `DROP USER <target> CASCADE`. This removes the user and its
+owned data, profiles, packages, tools, task history, agents, teams, and direct
+grants. The app clears related local target/team/chat/token state afterward.
+OCI IAM policies and dynamic groups are not changed.
+
+### Delete Database
+
+**Route:** `/setup/infra/provision?view=delete`
+
+The final infrastructure cleanup requires an explicit confirmation and exact
+database identity. It does not remove IAM policies, Vault secrets, or external
+OAuth registrations.
+
+## A2A Testing pages
+
+### Local Listener
+
+**Route:** `/test/listener`
+
+Starts or stops the local OAuth callback listener for same-machine
+authorization-code testing. It displays the exact local callback URI to add to
+an OAuth registration. Production clients use their own published callback URI.
 
 ### OAuth · Get Token
 
-This page models the external authorization-code experience used by an A2A
-client such as Google Gemini Enterprise. It does not require a local OCI
-profile or an ADMIN password. Client credentials, authorization codes, refresh
-tokens, and access tokens stay in process memory only.
+**Route:** `/test/token`
 
-1. **Local callback listener**
-   - Provide a button that enables a one-time local callback listener and
-     displays its exact loopback callback URI for registration.
-   - This is only for a browser on the same machine. Google Enterprise must
-     use the exact callback URI supplied by its connector configuration UI.
-   - The listener accepts only expected OAuth callback parameters, keeps the
-     authorization code in process memory only, never renders the raw code,
-     and clearly shows received or expired state.
+Performs external OAuth authorization code flow:
 
-2. **Authorize and exchange**
-   - Use the saved Setup region to prepare endpoints and the saved Autonomous
-     Database OCID for A2A team discovery after token acquisition. Do not ask
-     the external user to re-enter either value.
-   - Display the known Google-compatible regional endpoints:
-     `/adb/auth/v1/connect/authorize` and `/adb/auth/v1/connect/token`.
-     These URLs do not contain the database OCID.
-   - Collect client ID to start authorization, then client ID and client
-     secret to exchange the locally captured code for a token.
-   - Treat token exchange and published-team discovery as separate results. If
-     the token exchange succeeds but discovery fails, say so explicitly; do
-     not label the discovery error as an OAuth exchange failure.
-   - Show no secret/token values in the UI and update the dock with token
-     expiry, scope, and source where returned. When explicit local debug mode
-     is enabled, allow a deliberate action to print the token to the local
-     server console only, with a prominent secret-handling warning.
+1. Prepare region-specific Oracle authorization and token endpoints.
+2. Supply the client ID and client secret from OAuth Registration.
+3. Authorize the target database user.
+4. Receive through the local listener or supply the returned code.
+5. Exchange it for an access token.
 
-### A2A Testing — Team Selection and Chat
+Client credentials, codes, refresh tokens, and access tokens are memory-only.
+Safe metadata such as subject, scope, and expiry is displayed; token printing is
+available only in explicit debug mode. The region determines OAuth endpoint
+hosts; the database OCID is used later for A2A requests, not in those URLs.
 
-This page is limited to team selection and chat. It requires an in-memory
-external OAuth token obtained on **OAuth · Get Token**.
+### Team Selection
 
-1. **Team or Agent Selection**
-   - User selects Agent Team from the list of known teams
-   - List can come from persisted settings
-   - Refresh is available on **Agents** and uses the active external token; it
-     does not require an ADMIN password connection.
-   - Currently selected Team is shown in bottom dock.
+**Route:** `/test/team`
 
-2. **Chat**
-   - Sends JSON-RPC `message/send` with the active external OAuth token.
-   - The current sample Agent Card does not advertise streaming. When Oracle
-     returns a task, automatically poll JSON-RPC `tasks/get` for up to 15
-     seconds so ordinary chat feels synchronous. Show its ID and retain a
-     **Check task status** action for slower work.
-   - Render returned text parts in the conversation and retain a small
-     in-memory history only. Preserve the opaque A2A `contextId`; when a task
-     is `input-required`, preserve both its context and task ID so a reply
-     resumes that task. **Start new conversation** intentionally discards
-     these values.
-   - Retain the most recent non-secret task response in a collapsible
-     diagnostic panel. This makes returned Oracle failure details visible
-     without exposing credentials or tokens.
+Uses the active external token and database OCID to discover published teams.
+The selected team is loaded with its Agent Card, which exposes endpoint,
+security, capability, and tool metadata. Zero discovered teams is an external
+publication result, not proof that no team exists in the target schema.
 
-## Persistence and security rules
+### Chat
 
-- `last-settings.json` stores non-secret form settings only and is ignored by
-  Git.
-- Wallets are stored under `wallet/` and ignored by Git.
-- Passwords, OAuth tokens, OpenAI keys, and OCI private keys must never be
-  persisted in `last-settings.json`, templates, logs, or status messages. The
-  sole exception is a user-invoked OAuth token print to the local server
-  console while explicit debug mode is enabled; it must never be rendered in
-  the browser.
-- OCI private-key selection must use a file input; do not ask users to paste
-  the private key into a normal field.
-- Select AI and sample-agent-installer debug output is opt-in via `--debug` or
-  `A2A_DEMO_DEBUG=1` and must redact secrets. Installer debug may show each
-  executable sample-script SQL block in the page and local command line; it
-  must not include passwords, OAuth tokens, or client secrets.
-- `SQL_VALIDATION.md` is the user-facing companion for SQL inspection, test,
-  and validation queries. `OAUTH_VALIDATION.md` is the separate command-line
-  authorization-code validation guide. Neither file may include credentials,
-  private keys, or OAuth tokens.
+**Route:** `/test/chat`
 
-## Active template structure
+Sends A2A JSON-RPC `message/send` with the selected team and in-memory token.
+The conversation retains timestamps and scrolls to the latest message. It waits
+briefly for a synchronous result, then exposes a pending task and status check
+only when needed.
 
-```text
-templates/
-├── base.html                 # Shared layout, CSS, and header navigation
-├── includes/
-│   └── status_dock.html      # Shared persistent status/results dock
-├── infra.html
-├── connect.html
-├── select_ai.html
-├── sample_data.html
-├── agents.html
-├── oauth_clients.html
-├── oauth_token.html
-└── inferencing.html
-```
+Normal view shows the conversation. Debug mode adds safe request/response and
+task diagnostics. “Task submitted” means A2A accepted the request; it is not a
+final database-agent answer. Use `TEAM_EXEC_ID` with the task/tool history and
+session-wait queries in `SQL_VALIDATION.md` and `AGENT_TEAM_RUNBOOK.md` to
+investigate failed or long-running calls.
 
-## How to request UI changes
+## Design rules
 
-Add or modify the relevant section above. For a new page, include:
-
-- Page name and route
-- Its role in the workflow
-- Ordered sections and the action each button performs
-- Inputs to collect and which values should persist
-- Expected success/error result in the status dock
-- Any destructive action, confirmation text, or security consideration
-
-## Change requests
-
-<!-- Add your next UI/product changes below this line. -->
-Every workflow page uses the same composition: one vertical center-pane task
-and a right-side help panel. Forms stack fields vertically so a user completes
-one decision at a time. The help panel explains the purpose of each page
-section, its inputs, and the next expected outcome.
-
-Database and target-schema passwords may remain in process memory for the
-current browser session after first use. Their fields render a mask and may be
-left unchanged to reuse the in-memory value; replacing the field updates it.
-They are never written to `last-settings.json`, the browser session cookie, or
-debug output, and disappear when the app process restarts. Vault secret OCIDs
-are identifiers, not secret values, and can be shown and persisted normally.
-The local callback listener is its own **A2A Testing · Local listener** page.
-It is deliberately separate from endpoint preparation, authorization, and code
-exchange so each navigation item has one topic and one action.
-
-The left workflow outline is the primary organizer, rather than an in-page
-tab strip. Each setup sub-item renders one focused operation, or at most two
-inseparable cards such as create-and-list. Destructive cleanup items always
-appear last in their workflow group: target Select AI cleanup, team deletion,
-and database deletion. The active navigation state identifies exactly one
-sub-item, while the right-side help explains that operation's inputs, result,
-and the next step.
+1. Keep Setup administration separate from external A2A Testing.
+2. Treat target selection as a successful database login, never a free-form
+   schema selection control.
+3. Prefer explicit, idempotent database operations and confirmations for
+   destructive operations.
+4. Keep pages focused, vertically stacked, and explain prerequisites in the
+   right help pane.
+5. Never persist or render secrets; redact them in debug output.
+6. Never describe a token, discovery response, Agent Card, or accepted task as
+   proof that the database agent completed a chat.
+7. Update this document whenever visible routes, status, ownership boundaries,
+   or setup/testing responsibilities change.
